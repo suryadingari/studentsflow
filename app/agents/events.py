@@ -1,0 +1,71 @@
+from datetime import datetime, timezone
+from enum import StrEnum
+from typing import Any, Protocol
+
+from pydantic import BaseModel, Field
+
+
+class AgentEventType(StrEnum):
+    AGENT_STARTED = "AGENT_STARTED"
+    AGENT_COMPLETED = "AGENT_COMPLETED"
+    AGENT_FAILED = "AGENT_FAILED"
+    AGENT_RETRY = "AGENT_RETRY"
+    HOP_LIMIT_EXCEEDED = "HOP_LIMIT_EXCEEDED"
+    IDEMPOTENCY_DUPLICATE = "IDEMPOTENCY_DUPLICATE"
+    TOOL_PERMISSION_DENIED = "TOOL_PERMISSION_DENIED"
+    EMAIL_DRAFT_REQUESTED = "EMAIL_DRAFT_REQUESTED"
+    EMAIL_DRAFT_GENERATED = "EMAIL_DRAFT_GENERATED"
+    EMAIL_DRAFT_BLOCKED = "EMAIL_DRAFT_BLOCKED"
+    EMAIL_SUBMITTED_FOR_REVIEW = "EMAIL_SUBMITTED_FOR_REVIEW"
+    EMAIL_HUMAN_EDITED = "EMAIL_HUMAN_EDITED"
+    EMAIL_HUMAN_APPROVED = "EMAIL_HUMAN_APPROVED"
+    EMAIL_HUMAN_REJECTED = "EMAIL_HUMAN_REJECTED"
+    OUTREACH_REQUESTED = "OUTREACH_REQUESTED"
+    OUTREACH_BLOCKED = "OUTREACH_BLOCKED"
+    OUTREACH_SEND_ATTEMPTED = "OUTREACH_SEND_ATTEMPTED"
+    OUTREACH_SEND_SUCCEEDED = "OUTREACH_SEND_SUCCEEDED"
+    OUTREACH_SEND_FAILED = "OUTREACH_SEND_FAILED"
+    OUTREACH_DUPLICATE_PREVENTED = "OUTREACH_DUPLICATE_PREVENTED"
+    OUTREACH_REPLY_RECORDED = "OUTREACH_REPLY_RECORDED"
+    OUTREACH_OPT_OUT_RECORDED = "OUTREACH_OPT_OUT_RECORDED"
+    OUTREACH_DELIVERED = "OUTREACH_DELIVERED"
+    OUTREACH_BOUNCED = "OUTREACH_BOUNCED"
+    FOLLOW_UP_PLANNED = "FOLLOW_UP_PLANNED"
+    FOLLOW_UP_CANCELLED = "FOLLOW_UP_CANCELLED"
+    WORKFLOW_CREATED = "WORKFLOW_CREATED"
+    WORKFLOW_STARTED = "WORKFLOW_STARTED"
+    WORKFLOW_STEP_STARTED = "WORKFLOW_STEP_STARTED"
+    WORKFLOW_STEP_COMPLETED = "WORKFLOW_STEP_COMPLETED"
+    WORKFLOW_STEP_FAILED = "WORKFLOW_STEP_FAILED"
+    WORKFLOW_PAUSED = "WORKFLOW_PAUSED"
+    WORKFLOW_APPROVAL_REQUESTED = "WORKFLOW_APPROVAL_REQUESTED"
+    WORKFLOW_APPROVAL_RECEIVED = "WORKFLOW_APPROVAL_RECEIVED"
+    WORKFLOW_RESUMED = "WORKFLOW_RESUMED"
+    WORKFLOW_CANCELLED = "WORKFLOW_CANCELLED"
+    WORKFLOW_COMPLETED = "WORKFLOW_COMPLETED"
+    WORKFLOW_FAILED = "WORKFLOW_FAILED"
+
+
+class AgentEvent(BaseModel):
+    event_type: AgentEventType
+    occurred_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    execution_id: str
+    workflow_id: str | None = None
+    workflow_step_id: str | None = None
+    agent_name: str
+    agent_version: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class EventRecorder(Protocol):
+    async def record(self, event: AgentEvent) -> None: ...
+
+
+class InMemoryEventRecorder:
+    """Process-local recorder useful for tests and development."""
+
+    def __init__(self) -> None:
+        self.events: list[AgentEvent] = []
+
+    async def record(self, event: AgentEvent) -> None:
+        self.events.append(event)
