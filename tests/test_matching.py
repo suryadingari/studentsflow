@@ -84,6 +84,8 @@ def test_full_match_contains_evidence_for_each_criterion():
     assert len(result.matched_required_criteria) == 5
     assert all(item.evidence and item.source_urls for item in result.matched_required_criteria)
     assert "All required criteria" in result.explanation
+    assert result.match_score == 100
+    assert "not a calibrated probability" in result.score_explanation
 
 
 def test_missing_required_skill_is_reported_as_partial_match():
@@ -97,6 +99,7 @@ def test_unverified_ai_interest_is_insufficient_evidence():
     assert result.status == MatchStatus.INSUFFICIENT_EVIDENCE
     ai = next(item for item in result.assessments if item.criterion_type == CriterionType.AI_INTEREST)
     assert ai.status == CriterionStatus.INSUFFICIENT_EVIDENCE
+    assert result.match_score < 100
 
 
 def test_non_final_year_is_a_definitive_no_match():

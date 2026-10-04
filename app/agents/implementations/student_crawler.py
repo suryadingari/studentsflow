@@ -33,12 +33,16 @@ class StudentCrawlerAgent(BaseAgent):
     def __init__(
         self,
         crawl_tool: Crawl4AITool | None = None,
+        real_tool: Crawl4AITool | None = None,
+        use_real_in_live_workflows: bool = False,
         *,
         allowed_domains: frozenset[str] | set[str] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.crawl_tool = crawl_tool or RealCrawl4AITool()
+        self.real_tool = real_tool or RealCrawl4AITool()
+        self.use_real_in_live_workflows = use_real_in_live_workflows
         self.allowed_domains = frozenset(allowed_domains if allowed_domains is not None
                                          else settings.allowed_domain_set)
         self._rate_limiters: dict[float, PerDomainRateLimiter] = {}
@@ -49,6 +53,8 @@ class StudentCrawlerAgent(BaseAgent):
             raise NonRetryableFailure("StudentCrawlerAgent requires StudentCrawlerRequest input")
 
         config = request.configuration
+        tool = (self.real_tool if self.use_real_in_live_workflows
+                and context.metadata.get("demo_mode") is False else self.crawl_tool)
         allowed_domains = intersect_domains(
             self.allowed_domains, config.allowed_domains, request.permitted_domains
         )
@@ -57,11 +63,11 @@ class StudentCrawlerAgent(BaseAgent):
             start_url, _ = policy.validate(request.source_url)
         except InvalidCrawlURL as error:
             result = _agent_error(request.source_url, CrawlErrorCode.INVALID_URL, str(error),
-                                  tool=self.crawl_tool)
+                                  tool=tool)
             return StudentCrawlerOutput(results=[result], stopped_reason="invalid URL")
         except DisallowedCrawlDomain as error:
             result = _agent_error(request.source_url, CrawlErrorCode.DOMAIN_NOT_ALLOWED, str(error),
-                                  tool=self.crawl_tool)
+                                  tool=tool)
             return StudentCrawlerOutput(results=[result], stopped_reason="domain not allowlisted")
 
         limiter = self._rate_limiters.setdefault(
@@ -87,7 +93,7 @@ class StudentCrawlerAgent(BaseAgent):
                 except Exception as error:
                     results.append(_agent_error(
                         normalized_url, CrawlErrorCode.HOP_LIMIT_EXCEEDED, str(error), domain=domain,
-                        tool=self.crawl_tool,
+                        tool=tool,
                     ))
                     stopped_reason = "workflow hop limit exceeded"
                     break
@@ -100,7 +106,7 @@ class StudentCrawlerAgent(BaseAgent):
                                    {"tool_name": "crawl4ai", "error": str(error)})
                 results.append(_agent_error(
                     normalized_url, CrawlErrorCode.PERMISSION_DENIED, str(error), domain=domain,
-                    tool=self.crawl_tool,
+                    tool=tool,
                 ))
                 stopped_reason = "crawl4ai tool permission denied"
                 break
@@ -114,17 +120,17 @@ class StudentCrawlerAgent(BaseAgent):
             )
             attempted += 1
             try:
-                crawl_result = await self.crawl_tool.crawl(crawl_request)
+                crawl_result = await tool.crawl(crawl_request)
             except (asyncio.TimeoutError, TimeoutError) as error:
                 crawl_result = error_result(crawl_request, CrawlErrorCode.TIMEOUT,
                                             str(error) or "Crawl timed out",
-                                            tool_version=self.crawl_tool.tool_version)
+                                            tool_version=tool.tool_version)
             except (ConnectionError, OSError) as error:
                 crawl_result = error_result(crawl_request, CrawlErrorCode.CONNECTION_FAILURE, str(error),
-                                            tool_version=self.crawl_tool.tool_version)
+                                            tool_version=tool.tool_version)
             except Exception as error:
                 crawl_result = error_result(crawl_request, CrawlErrorCode.TOOL_FAILURE, str(error),
-                                            tool_version=self.crawl_tool.tool_version)
+                                            tool_version=tool.tool_version)
 
             if not isinstance(crawl_result, CrawlResult):
                 crawl_result = error_result(
@@ -147,7 +153,7 @@ class StudentCrawlerAgent(BaseAgent):
                     crawl_result = _agent_error(
                         normalized_url, CrawlErrorCode.DOMAIN_NOT_ALLOWED,
                         f"Final URL is outside the permitted domain policy: {error}", domain=domain,
-                        final_url=crawl_result.final_url, tool=self.crawl_tool,
+                        final_url=crawl_result.final_url, tool=tool,
                     )
 
             crawl_result.provenance.depth = depth

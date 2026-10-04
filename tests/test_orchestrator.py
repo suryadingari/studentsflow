@@ -21,7 +21,8 @@ from app.schemas.student import (AIEvidenceCategory, ClaimType, Evidence, Eviden
                                 SourcedFact, StudentProfile)
 from app.schemas.workflow import (WorkflowRequest, WorkflowStatus, WorkflowStepStatus,
                                   WorkflowStepType)
-from app.crawling.models import SourceAccess, SourceCandidate, SourceType, CrawlConfiguration
+from app.crawling.models import (CrawlConfiguration, CrawlMetadata, CrawlResult,
+                                 SourceAccess, SourceCandidate, SourceType)
 
 
 URL = "https://public.example.org/student"
@@ -103,6 +104,57 @@ def test_workflow_runs_existing_agents_in_canonical_order_and_pauses():
                 WorkflowStepType.HUMAN_APPROVAL]
     assert types == expected
     assert result.status == WorkflowStatus.WAITING_FOR_APPROVAL
+
+
+def test_controlled_url_demo_runs_extraction_validation_match_and_evidence_to_approval():
+    fixture_url = URL
+    fixture_page = CrawlResult(
+        requested_url=fixture_url, final_url=fixture_url, status_code=200,
+        page_title="SYNTHETIC TEST FIXTURE — student project profile",
+        raw_content=("SYNTHETIC TEST FIXTURE — not a real candidate.\n"
+                     "Name: Synthetic Fixture Student\n"
+                     "Expected graduation: 2027\n"
+                     "Location: India\n"
+                     "Project: Computer Vision traffic sign recognition using CNN\n"
+                     "Public contact: fixture@example.org"),
+        success=True,
+        provenance=CrawlMetadata(source_url=fixture_url, final_url=fixture_url,
+                                 domain=DOMAIN, tool_name="crawl4ai", tool_version="mock-test"),
+    )
+    recorder = InMemoryEventRecorder()
+    orchestrator = create_demo_orchestrator(crawl_responses={fixture_url: fixture_page},
+                                            allowed_domains={DOMAIN}, event_recorder=recorder)
+
+    result = run(orchestrator.start(workflow_request()))
+
+    assert result.status == WorkflowStatus.WAITING_FOR_APPROVAL
+    assert result.source_discovery.candidates[0].origin.value == "user_supplied"
+    assert result.validated_profiles[0].final_year_status.value == "final_year_verified"
+    assert result.validated_profiles[0].ai_interest_status.value == "ai_interest_supported"
+    assert result.candidate_matches[0].match_score > 0
+    assert result.drafts and result.pending_draft_ids == [result.drafts[0].draft_id]
+    assert result.drafts[0].recipient.email == "fixture@example.org"
+    event_types = {event.event_type.value for event in recorder.events}
+    assert {"SOURCE_DISCOVERED", "SOURCE_CRAWLED", "CANDIDATE_EXTRACTED",
+            "CANDIDATE_VALIDATED", "EVIDENCE_CREATED", "CANDIDATE_MATCHED"} <= event_types
+
+
+def test_background_submission_returns_job_identifier_and_progress_is_pollable():
+    async def exercise():
+        orchestrator = ready_orchestrator()
+        submitted = await orchestrator.submit(workflow_request())
+        assert submitted.job_id == submitted.workflow_id
+        assert submitted.status == WorkflowStatus.RUNNING
+        for _ in range(100):
+            current = await orchestrator.get(submitted.workflow_id)
+            if current.status != WorkflowStatus.RUNNING:
+                return current
+            await asyncio.sleep(0.01)
+        raise AssertionError("background workflow did not reach a terminal/approval state")
+
+    result = run(exercise())
+    assert result.status == WorkflowStatus.WAITING_FOR_APPROVAL
+    assert result.steps
 
 
 def test_approval_is_required_and_no_outreach_occurs_before_it():
@@ -227,7 +279,7 @@ def test_missing_registered_agent_is_a_critical_failure():
 
 def test_demo_workflow_rejects_provider_without_explicit_non_sending_declaration():
     orchestrator = ready_orchestrator()
-    provider = orchestrator.registry.get("outreach").provider
+    provider = orchestrator.registry.get("outreach").demo_provider
     provider.sends_real_email = True
     result = run(orchestrator.start(workflow_request()))
     final = run(orchestrator.resume_after_approval(
@@ -372,9 +424,11 @@ def test_fastapi_reports_missing_postgresql_configuration(monkeypatch):
             "sources": [],
             "permitted_domains": [],
             "demo_mode": True,
-        })
+    })
     assert response.status_code == 503
-    assert "placeholder" in response.json()["detail"].lower()
+    assert response.json()["detail"] == (
+        "PostgreSQL operation failed; check server logs for a redacted diagnostic."
+    )
 
 
 @pytest.mark.parametrize("action", [ApprovalActionType.APPROVE, ApprovalActionType.REJECT])

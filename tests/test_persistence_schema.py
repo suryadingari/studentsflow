@@ -14,6 +14,7 @@ EXPECTED_TABLES = {
     "email_drafts", "email_draft_versions", "approval_records", "outreach_records",
     "outreach_events", "replies", "opt_outs", "follow_up_plans", "tool_calls",
     "audit_logs", "kpi_metrics",
+    "user_accounts",
 }
 
 

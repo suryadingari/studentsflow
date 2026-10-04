@@ -121,6 +121,37 @@ def test_missing_or_unauthorized_recipient_never_calls_provider():
     assert provider.calls == []
 
 
+def test_smtp_provider_uses_tls_and_returns_provider_reference_without_exposing_credentials(monkeypatch):
+    from app.outreach.provider import SMTPEmailProvider
+    from app.schemas.outreach import ProviderMessage, ProviderStatus
+
+    calls = []
+
+    class _SMTP:
+        def __init__(self, host, port, timeout):
+            calls.append(("connect", host, port, timeout))
+
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def ehlo(self): calls.append(("ehlo",))
+        def starttls(self): calls.append(("tls",))
+        def login(self, username, password): calls.append(("login", username, password))
+        def send_message(self, message): calls.append(("send", message["To"], message["Subject"]))
+
+    monkeypatch.setattr("app.outreach.provider.smtplib.SMTP", _SMTP)
+    provider = SMTPEmailProvider(host="mail.example", port=587, from_email="team@example.org",
+                                 from_name="Research", username="user", password="secret")
+    message = ProviderMessage(draft_id="d1", approved_version=1, idempotency_key="a" * 64,
+                              recipient="student@example.org", subject="Opportunity", body="Hello")
+    result = asyncio.run(provider.send(message))
+
+    assert result.status == ProviderStatus.SENT
+    assert result.provider_name == "smtp"
+    assert ("tls",) in calls
+    assert ("login", "user", "secret") in calls
+    assert calls[-1] == ("send", "student@example.org", "Opportunity")
+
+
 def test_opted_out_recipient_is_blocked_before_provider_call():
     store = InMemoryOutreachStore()
     provider = MockEmailProvider()

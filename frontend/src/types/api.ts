@@ -44,6 +44,8 @@ export interface CandidateMatch {
   canonical_student_id: string
   candidate_name?: string | null
   status: string
+  match_score: number
+  score_explanation: string
   assessments: Assessment[]
   explanation: string
   uncertainties: string[]
@@ -57,6 +59,8 @@ export interface Draft {
   status: string
   versions: Array<{ version_number: number; subject: string; body: string; authored_by: string; created_at: string }>
   approvals: Array<{ action_id: string; action: string; actor_id: string; occurred_at: string; version_number: number; reason?: string | null }>
+  evidence_references: Array<{ criterion_type: string; evidence_id: string; source_url: string; supporting_text: string; claim_value: unknown }>
+  personalization_points: Array<{ criterion_type: string; statement: string; evidence_references: Array<{ criterion_type: string; evidence_id: string; source_url: string; supporting_text: string; claim_value: unknown }> }>
 }
 export interface OutreachResult {
   outreach_id: string
@@ -79,6 +83,7 @@ export interface WorkflowStep {
 }
 export interface Workflow {
   workflow_id: string
+  job_id?: string | null
   requirement_id: string
   status: WorkflowStatus
   current_step?: string | null
@@ -94,8 +99,10 @@ export interface Workflow {
   created_at: string
   updated_at: string
   metrics: Record<string, number>
+  source_discovery?: { candidates: Array<{ url: string; origin?: string; discovery_metadata?: Record<string, unknown> }>; rejected: Array<{ url: string; reason: string }>; note: string; search_performed: boolean; search_provider?: string | null } | null
 }
 export interface PersistedStep extends Omit<WorkflowStep, 'workflow_id' | 'step_type'> { step_type: string; input_metadata?: Record<string, unknown>; output_metadata?: Record<string, unknown> }
+export interface AuditEvent { audit_id: string; event_type: string; occurred_at: string; step_id?: string | null; agent_name: string; agent_version: string; details: Record<string, unknown> }
 export type Kpis = Record<string, number>
 export interface Criterion {
   criterion_type: 'final_year' | 'ai_interest' | 'location' | 'university' | 'degree' | 'branch' | 'skill' | 'ai_area' | 'project' | 'research' | 'experience'
@@ -108,4 +115,6 @@ export interface WorkflowRequest {
   permitted_domains: string[]
   crawl_configuration: { allowed_domains: string[]; max_pages: number; max_depth: number }
   demo_mode: boolean
+  search_enabled?: boolean
+  max_search_results?: number
 }

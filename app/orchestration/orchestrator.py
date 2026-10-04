@@ -1,6 +1,7 @@
 """Coordinates the existing versioned agents; business rules remain in those agents."""
 
 from dataclasses import dataclass, field
+import asyncio
 from typing import Any
 from uuid import uuid4
 
@@ -21,6 +22,7 @@ from app.schemas.student import ExtractedStudentInformation, StudentValidationRe
 from app.schemas.workflow import (WorkflowMetrics, WorkflowRequest, WorkflowResult, WorkflowStatus,
                                   WorkflowStep, WorkflowStepStatus, WorkflowStepType, now_utc)
 from app.db.persistence import PostgresWorkflowRepository
+from app.orchestration.jobs import InProcessWorkflowJobRunner, WorkflowJobRunner
 
 
 _SERVICE_AGENT = "workflow_orchestrator"
@@ -69,20 +71,35 @@ class WorkflowOrchestrator:
                  approval_service: EmailApprovalService,
                  event_recorder: EventRecorder | None = None,
                  store: InMemoryWorkflowStore | None = None,
-                 persistence: PostgresWorkflowRepository | None = None) -> None:
+                 persistence: PostgresWorkflowRepository | None = None,
+                 job_runner: WorkflowJobRunner | None = None) -> None:
         self.registry = registry
         self.approval_service = approval_service
         self.event_recorder = event_recorder or InMemoryEventRecorder()
         self.store = store or InMemoryWorkflowStore()
         self.persistence = persistence
+        self.job_runner = job_runner or InProcessWorkflowJobRunner()
 
     async def start(self, request: WorkflowRequest) -> WorkflowResult:
+        runtime = await self._create_runtime(request)
+        await self._execute_runtime(runtime)
+        return self.store.get(runtime.result.workflow_id)
+
+    async def submit(self, request: WorkflowRequest) -> WorkflowResult:
+        """Persist then enqueue a bounded in-process job; workflow_id is its job id."""
+        runtime = await self._create_runtime(request)
+        self.job_runner.submit(runtime.result.workflow_id,
+                               lambda: self._execute_runtime(runtime))
+        return self.store.get(runtime.result.workflow_id)
+
+    async def _create_runtime(self, request: WorkflowRequest) -> _Runtime:
         workflow_id = str(uuid4())
         requirement_id = request.requirement.requirement_id or str(uuid4())
         request = request.model_copy(deep=True)
         request.requirement.requirement_id = requirement_id
         now = now_utc()
-        result = WorkflowResult(workflow_id=workflow_id, requirement_id=requirement_id,
+        result = WorkflowResult(workflow_id=workflow_id, job_id=workflow_id,
+                                requirement_id=requirement_id,
                                 status=WorkflowStatus.CREATED, created_at=now, updated_at=now)
         runtime = _Runtime(result=result, request=request)
         self.store.add(runtime)
@@ -91,13 +108,18 @@ class WorkflowOrchestrator:
         self._transition(runtime, WorkflowStatus.RUNNING)
         await self._persist(runtime)
         await self._audit(runtime, AgentEventType.WORKFLOW_STARTED)
+        return runtime
+
+    async def _execute_runtime(self, runtime: _Runtime) -> None:
         try:
             await self._run_until_approval(runtime)
         except HopLimitExceeded as error:
             await self._critical_failure(runtime, "hop_limit_exceeded", str(error))
+        except asyncio.CancelledError:
+            # The API cancellation path persists the user-visible cancelled state.
+            raise
         except Exception as error:
             await self._critical_failure(runtime, type(error).__name__, str(error))
-        return self.store.get(workflow_id)
 
     async def get(self, workflow_id: str) -> WorkflowResult:
         if self.persistence is not None:
@@ -173,6 +195,7 @@ class WorkflowOrchestrator:
         await self._audit(runtime, AgentEventType.WORKFLOW_CANCELLED,
                           details={"reason": reason.strip()})
         await self._persist(runtime)
+        self.job_runner.cancel(workflow_id)
         return self.store.get(workflow_id)
 
     async def _run_until_approval(self, runtime: _Runtime) -> None:
@@ -180,9 +203,16 @@ class WorkflowOrchestrator:
         discovered: SourceDiscoveryOutput = await self._invoke(
             runtime, WorkflowStepType.SOURCE_DISCOVERY, "source_discovery",
             SourceDiscoveryRequest(requirement=request.requirement.raw_text or request.requirement.model_dump_json(),
-                                   candidates=request.sources, permitted_domains=request.permitted_domains),
+                                   candidates=request.sources, permitted_domains=request.permitted_domains,
+                                   search_enabled=request.search_enabled,
+                                   max_search_results=request.max_search_results),
             logical_item_id="sources")
         runtime.result.source_discovery = discovered.model_copy(deep=True)
+        for source in discovered.candidates:
+            await self._audit(runtime, AgentEventType.SOURCE_DISCOVERED,
+                              agent_name="source_discovery", agent_version="2.1.0",
+                              details={"url": source.url, "origin": source.origin.value,
+                                       "provider": source.discovery_metadata.get("provider")})
         crawls = []
         for source in discovered.candidates:
             if runtime.result.status != WorkflowStatus.RUNNING:
@@ -196,6 +226,16 @@ class WorkflowOrchestrator:
                     logical_item_id=source.url,
                     tool_grants=request.permitted_tools)
                 crawls.extend(output.results)
+                for crawl_result in output.results:
+                    await self._audit(
+                        runtime,
+                        AgentEventType.SOURCE_CRAWLED if crawl_result.success else AgentEventType.CRAWL_FAILED,
+                        agent_name="student_crawler", agent_version="2.0.0",
+                        details={"url": crawl_result.requested_url,
+                                 "status_code": crawl_result.status_code,
+                                 "error_code": crawl_result.error.code.value if crawl_result.error else None,
+                                 "tool": crawl_result.provenance.tool_name,
+                                 "tool_version": crawl_result.provenance.tool_version})
             except _ItemFailure as error:
                 runtime.result.errors.append(f"Student crawler failed for {source.url}: {error}")
         # Preserve crawl provenance and errors but avoid retaining whole page bodies;
@@ -205,9 +245,24 @@ class WorkflowOrchestrator:
         extracted: list[ExtractedStudentInformation] = []
         for crawl in (item for item in crawls if item.success):
             try:
-                extracted.append(await self._invoke(
+                extracted_item = await self._invoke(
                     runtime, WorkflowStepType.EXTRACTION, "extraction", crawl,
-                    logical_item_id=crawl.requested_url))
+                    logical_item_id=crawl.requested_url)
+                extracted.extend(_flatten_extracted(extracted_item))
+                for record in _flatten_extracted(extracted_item):
+                    await self._audit(
+                        runtime, AgentEventType.CANDIDATE_EXTRACTED,
+                        agent_name="extraction", agent_version="2.0.0",
+                        details={"source_url": crawl.requested_url,
+                                 "evidence_count": len(record.evidence),
+                                 "student_reference": record.profile.student_reference})
+                    for evidence in record.evidence:
+                        await self._audit(
+                            runtime, AgentEventType.EVIDENCE_CREATED,
+                            agent_name="extraction", agent_version="2.0.0",
+                            details={"evidence_id": evidence.evidence_id,
+                                     "claim_type": evidence.claim_type.value,
+                                     "source_url": str(evidence.source_url)})
             except _ItemFailure as error:
                 runtime.result.errors.append(str(error))
         runtime.result.extracted_profiles = [item.model_copy(deep=True) for item in extracted]
@@ -219,6 +274,12 @@ class WorkflowOrchestrator:
                     ValidationRequest(extracted=item, current_year=request.current_year,
                                       research_complete=bool(crawls) and all(crawl.success for crawl in crawls)),
                     logical_item_id=str(item.source_references[0].source_url) if item.source_references else "unknown"))
+                validated_item = runtime.validated[-1]
+                await self._audit(runtime, AgentEventType.CANDIDATE_VALIDATED,
+                                  agent_name="validation", agent_version="2.0.0",
+                                  details={"final_year_status": validated_item.final_year_status.value,
+                                           "ai_interest_status": validated_item.ai_interest_status.value,
+                                           "evidence_count": len(validated_item.evidence_references)})
             except _ItemFailure as error:
                 runtime.result.errors.append(str(error))
         runtime.result.metrics.candidates_validated = len(runtime.validated)
@@ -228,6 +289,12 @@ class WorkflowOrchestrator:
                                    logical_item_id="validated-profiles")
         runtime.canonical_students = dedup.canonical_students
         runtime.result.deduplication_decisions = [item.model_copy(deep=True) for item in dedup.decisions]
+        for decision in dedup.decisions:
+            await self._audit(runtime, AgentEventType.CANDIDATE_DEDUPLICATED,
+                              agent_name="deduplication", agent_version="2.0.0",
+                              details={"left_profile_index": decision.left_profile_index,
+                                       "right_profile_index": decision.right_profile_index,
+                                       "decision": decision.decision.value})
         runtime.result.canonical_students = [item.model_copy(deep=True) for item in runtime.canonical_students]
         enriched: list[CanonicalStudent] = []
         for student in runtime.canonical_students:
@@ -247,6 +314,12 @@ class WorkflowOrchestrator:
                                       logical_item_id="all-candidates")
         runtime.matches = {match.canonical_student_id: match for match in matching.candidate_matches}
         runtime.result.candidate_matches = [item.model_copy(deep=True) for item in matching.candidate_matches]
+        for match in matching.candidate_matches:
+            await self._audit(runtime, AgentEventType.CANDIDATE_MATCHED,
+                              agent_name="matching", agent_version="2.0.0",
+                              details={"canonical_student_id": match.canonical_student_id,
+                                       "status": match.status.value,
+                                       "match_score": match.match_score})
         runtime.result.metrics.candidates_matched = sum(
             1 for match in matching.candidate_matches if match.status.value == "match")
         for student in runtime.canonical_students:
@@ -366,11 +439,13 @@ class WorkflowOrchestrator:
                                max_hops=runtime.request.max_hops,
                                idempotency_key=key, permitted_tools=grants,
                                metadata={"demo_mode": runtime.request.demo_mode})
-        if (agent_name == "outreach"
-                and getattr(getattr(agent, "provider", None), "sends_real_email", None) is not False):
+        active_provider = (getattr(agent, "demo_provider", None) if runtime.request.demo_mode
+                           else getattr(agent, "provider", None))
+        if (agent_name == "outreach" and runtime.request.demo_mode
+                and getattr(active_provider, "sends_real_email", None) is not False):
             step.state = WorkflowStepStatus.FAILED
             step.error_category = "unsafe_provider"
-            step.error = "This workflow phase only permits an explicitly non-sending email provider"
+            step.error = "Demo workflows require an explicitly non-sending email provider"
             step.ended_at = now_utc()
             runtime.result.metrics.steps_total += 1
             runtime.result.metrics.steps_failed += 1
@@ -569,3 +644,10 @@ class WorkflowOrchestrator:
 
 class _ItemFailure(Exception):
     """Marks a candidate/source-local failure that need not abort sibling items."""
+
+
+def _flatten_extracted(item: ExtractedStudentInformation) -> list[ExtractedStudentInformation]:
+    output = [item.model_copy(update={"additional_candidates": []}, deep=True)]
+    for child in item.additional_candidates:
+        output.extend(_flatten_extracted(child))
+    return output

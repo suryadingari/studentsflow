@@ -76,6 +76,8 @@ class CandidateMatch(BaseModel):
     canonical_student_id: str
     candidate_name: str | None = None
     status: MatchStatus
+    match_score: int = Field(default=0, ge=0, le=100)
+    score_explanation: str = "Deterministic weighted evidence coverage; not a probability."
     assessments: list[CriterionAssessment] = Field(default_factory=list)
     matched_required_criteria: list[CriterionAssessment] = Field(default_factory=list)
     missing_required_criteria: list[CriterionAssessment] = Field(default_factory=list)

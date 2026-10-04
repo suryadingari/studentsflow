@@ -194,12 +194,14 @@ class RealCrawl4AITool:
                 return error_result(request, CrawlErrorCode.ACCESS_RESTRICTED,
                                     "Source denied access or robots policy disallowed crawling.",
                                     status_code=status_code, tool_version=self.tool_version, started=started)
-            raw_content = getattr(raw, "html", None)
+            # Prefer the crawler's readable representation: raw HTML is often a
+            # single minified line and defeats evidence-preserving line extraction.
+            markdown = getattr(raw, "markdown", None)
+            raw_content = getattr(markdown, "raw_markdown", markdown)
             if not isinstance(raw_content, str) or not raw_content:
                 raw_content = getattr(raw, "cleaned_html", None)
             if not isinstance(raw_content, str) or not raw_content:
-                markdown = getattr(raw, "markdown", None)
-                raw_content = getattr(markdown, "raw_markdown", markdown)
+                raw_content = getattr(raw, "html", None)
             if raw_content is not None and not isinstance(raw_content, str):
                 raw_content = str(raw_content)
             if not isinstance(raw_content, str):

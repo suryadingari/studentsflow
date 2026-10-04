@@ -55,6 +55,16 @@ def _postgres_database_url() -> _RedactedDatabaseURL:
     return _RedactedDatabaseURL(validate_database_url(configured_url))
 
 
+def _postgres_integration_is_configured() -> bool:
+    from app.db.persistence import DatabaseConfigurationError
+
+    try:
+        _postgres_database_url()
+    except DatabaseConfigurationError:
+        return False
+    return True
+
+
 def _safe_workflow_diagnostics(result, database_url: str) -> str:
     parsed = make_url(str(database_url))
     raw_url = parsed.render_as_string(hide_password=False)
@@ -344,8 +354,8 @@ def test_process_restart_and_relational_state_with_sqlite_test_adapter(tmp_path,
     asyncio.run(_exercise_restart(database_url, monkeypatch=monkeypatch))
 
 
-@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL") and not os.path.isfile(".env"),
-                    reason="configure DATABASE_URL or TEST_DATABASE_URL for PostgreSQL integration")
+@pytest.mark.skipif(not _postgres_integration_is_configured(),
+                    reason="configure a valid DATABASE_URL or TEST_DATABASE_URL for PostgreSQL integration")
 def test_process_restart_and_relational_state_with_postgresql():
     database_url = _postgres_database_url()
     if os.name == "nt" and hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):

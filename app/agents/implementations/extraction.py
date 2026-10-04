@@ -2,6 +2,7 @@
 
 import hashlib
 import re
+from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urlparse
 
@@ -28,6 +29,47 @@ _ACTIVITY = re.compile(r"project|built|developed|research|publication|internship
 _INTEREST = re.compile(r"interested in|interest in|passionate about|research interests?", re.I)
 
 
+class _VisibleText(HTMLParser):
+    """Extract visible text with line boundaries from public HTML pages."""
+
+    _BLOCKS = {"address", "article", "br", "dd", "div", "dt", "h1", "h2", "h3", "h4",
+               "li", "p", "section", "tr"}
+    _IGNORED = {"script", "style", "noscript", "svg"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.ignored_depth = 0
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag in self._IGNORED:
+            self.ignored_depth += 1
+        elif not self.ignored_depth and tag in self._BLOCKS:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self._IGNORED and self.ignored_depth:
+            self.ignored_depth -= 1
+        elif not self.ignored_depth and tag in self._BLOCKS:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if not self.ignored_depth and data.strip():
+            self.parts.append(data.strip())
+
+
+def _readable_text(content: str) -> str:
+    if "<" not in content or ">" not in content:
+        return content
+    parser = _VisibleText()
+    try:
+        parser.feed(content)
+        return "\n".join(part for part in parser.parts if part.strip())
+    except Exception:
+        # Preserve source text rather than dropping evidence on malformed HTML.
+        return content
+
+
 def _source_type(url: str, title: str | None) -> EvidenceType:
     host = urlparse(url).hostname or ""
     if "github.com" in host:
@@ -47,6 +89,15 @@ class ExtractionAgent(BaseAgent):
         crawl = agent_input.payload
         if not isinstance(crawl, CrawlResult):
             crawl = CrawlResult.model_validate(crawl)
+        readable = _readable_text(crawl.raw_content or "")
+        candidate_sections = _split_named_candidate_sections(readable)
+        if len(candidate_sections) > 1:
+            records = []
+            for section in candidate_sections:
+                child = crawl.model_copy(update={"raw_content": section}, deep=True)
+                records.append(await self._execute(AgentInput(payload=child), context))
+            primary = records[0]
+            return primary.model_copy(update={"additional_candidates": records[1:]}, deep=True)
         source_url = crawl.requested_url
         source_type = _source_type(source_url, crawl.page_title)
         source = SourceReference(
@@ -85,10 +136,13 @@ class ExtractionAgent(BaseAgent):
             "academic year": ClaimType.ACADEMIC_YEAR, "current year": ClaimType.ACADEMIC_YEAR,
             "current academic year": ClaimType.ACADEMIC_YEAR,
             "location": ClaimType.LOCATION, "skill": ClaimType.SKILL, "skills": ClaimType.SKILL,
+            "public contact": ClaimType.PUBLIC_CONTACT, "public email": ClaimType.PUBLIC_CONTACT,
+            "github": ClaimType.PROFILE_URL, "github url": ClaimType.PROFILE_URL,
+            "portfolio": ClaimType.PROFILE_URL, "portfolio url": ClaimType.PROFILE_URL,
             "project": ClaimType.PROJECT, "projects": ClaimType.PROJECT,
             "research interest": ClaimType.RESEARCH_INTEREST, "research interests": ClaimType.RESEARCH_INTEREST,
         }
-        for line in crawl.raw_content.splitlines():
+        for line in readable.splitlines():
             text = line.strip().lstrip("#*- ").strip()
             if not text:
                 continue
@@ -154,8 +208,20 @@ class ExtractionAgent(BaseAgent):
             projects=facts.get(ClaimType.PROJECT, []), research_interests=facts.get(ClaimType.RESEARCH_INTEREST, []),
             github=next((fact for fact in facts.get(ClaimType.PROFILE_URL, []) if "github.com" in str(fact.value)), None),
             portfolio=next((fact for fact in facts.get(ClaimType.PROFILE_URL, []) if "github.com" not in str(fact.value)), None),
+            public_contact=one(ClaimType.PUBLIC_CONTACT),
             evidence=evidence, source_references=[source],
         )
         note = [] if evidence else ["No structured student information was identified in the source content."]
         return ExtractedStudentInformation(profile=profile, evidence=evidence,
                                            source_references=[source], extraction_notes=note)
+
+
+def _split_named_candidate_sections(content: str) -> list[str]:
+    """Separate clearly labeled profile sections without guessing page structure."""
+    lines = content.splitlines()
+    starts = [index for index, line in enumerate(lines)
+              if re.match(r"\s*(?:[-*]\s*)?name\s*:\s*\S+", line, re.I)]
+    if len(starts) < 2:
+        return [content]
+    return ["\n".join(lines[start:end]).strip()
+            for start, end in zip(starts, [*starts[1:], len(lines)])]

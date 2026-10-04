@@ -55,6 +55,8 @@ class WorkflowStepStatus(StrEnum):
 
 
 class WorkflowRequest(BaseModel):
+    # Set by the authenticated API layer, never trusted from a client payload.
+    owner_id: str | None = None
     requirement: UserRequirement
     sources: list[SourceCandidate] = Field(default_factory=list)
     permitted_domains: frozenset[str] = Field(default_factory=frozenset)
@@ -63,6 +65,8 @@ class WorkflowRequest(BaseModel):
     campaign_id: str | None = None
     signature: str = "Research Team"
     demo_mode: bool = True
+    search_enabled: bool = False
+    max_search_results: int = Field(default=10, ge=1, le=25)
     permitted_tools: frozenset[str] = Field(default_factory=lambda: frozenset({
         "crawl4ai", "email_provider", "opt_out_service", "outreach_rate_limiter",
         "outreach_event_store",
@@ -108,6 +112,7 @@ class WorkflowMetrics(BaseModel):
 
 class WorkflowResult(BaseModel):
     workflow_id: str
+    job_id: str | None = None
     requirement_id: str
     status: WorkflowStatus
     current_step: WorkflowStepType | None = None

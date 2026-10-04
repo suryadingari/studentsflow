@@ -36,12 +36,14 @@ class OutreachAgent(BaseAgent):
     allowed_tools = frozenset({EMAIL_PROVIDER_TOOL, OPT_OUT_TOOL, RATE_LIMITER_TOOL, OUTREACH_STORE_TOOL})
 
     def __init__(self, *, provider: EmailProvider | None = None,
+                 demo_provider: EmailProvider | None = None,
                  opt_out_service: InMemoryOptOutService | None = None,
                  rate_limiter: InMemoryRateLimiter | None = None,
                  outreach_store: InMemoryOutreachStore | None = None,
                  retry_policy: RetryPolicy | None = None, **kwargs: Any) -> None:
         super().__init__(retry_policy=retry_policy, **kwargs)
         self.provider = provider or MockEmailProvider()
+        self.demo_provider = demo_provider or self.provider
         self.opt_out_service = opt_out_service or InMemoryOptOutService()
         self.rate_limiter = rate_limiter or InMemoryRateLimiter()
         self.outreach_store = outreach_store or InMemoryOutreachStore()
@@ -51,6 +53,7 @@ class OutreachAgent(BaseAgent):
         if not isinstance(request, OutreachRequest):
             request = OutreachRequest.model_validate(request)
         draft = request.draft
+        provider = self.demo_provider if context.metadata.get("demo_mode", True) else self.provider
         self.require_tool(OUTREACH_STORE_TOOL, context)
         idem_key = _send_key(draft, request.campaign_id)
         outreach_id = "outreach-" + hashlib.sha256(idem_key.encode()).hexdigest()[:20]
@@ -127,13 +130,13 @@ class OutreachAgent(BaseAgent):
                              AgentEventType.OUTREACH_SEND_ATTEMPTED, context,
                              {"attempt": attempt_count})
             try:
-                result = await self.provider.send(message)
+                result = await provider.send(message)
             except Exception as error:
                 result = ProviderResult(
                     status=ProviderStatus.FAILED, recipient=recipient.email,
                     subject=draft.approved_subject,
                     error=f"Provider raised {type(error).__name__}.",
-                    provider_name=getattr(self.provider, "provider_name", "abstract"),
+                    provider_name=getattr(provider, "provider_name", "abstract"),
                 )
             last_provider_result = result
             await self._emit(outreach_id, _provider_event(result.status),

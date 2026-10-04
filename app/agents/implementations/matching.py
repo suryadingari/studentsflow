@@ -125,10 +125,20 @@ class MatchingAgent(BaseAgent):
             explanation += " Preferred criteria not met: " + ", ".join(
                 f"{item.criterion_type.value}={item.value or 'preferred'}" for item in missing_preferred) + "."
 
+        # Required criteria carry twice the weight of preferences. Only directly
+        # evidence-matched criteria earn points; unknown or missing evidence earns 0.
+        weights = [2 if item.required else 1 for item in assessments]
+        possible = sum(weights)
+        earned = sum(weight for item, weight in zip(assessments, weights)
+                     if item.status == CriterionStatus.MATCHED)
+        match_score = round(100 * earned / possible) if possible else 0
+
         return CandidateMatch(
             student_reference=profile.student_reference or candidate.canonical_id,
             canonical_student_id=candidate.canonical_id, candidate_name=name,
             status=status, assessments=assessments,
+            match_score=match_score,
+            score_explanation="Weighted evidence coverage (required criteria count double); not a calibrated probability.",
             matched_required_criteria=matched_required,
             missing_required_criteria=missing_required,
             missing_preferred_criteria=missing_preferred,

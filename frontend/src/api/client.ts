@@ -1,18 +1,24 @@
-import type { Kpis, PersistedStep, Workflow, WorkflowRequest } from '../types/api'
+import type { AuditEvent, Kpis, PersistedStep, Workflow, WorkflowRequest } from '../types/api'
 
-const baseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') || 'http://localhost:8000'
+const configuredBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim().replace(/\/$/, '')
+const baseUrl = configuredBaseUrl || (import.meta.env.DEV ? 'http://localhost:8000' : '')
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  if (!baseUrl) throw new Error('VITE_API_BASE_URL must be configured for this production build.')
   let response: Response
   try {
     response = await fetch(`${baseUrl}${path}`, {
       ...init,
-      headers: { ...(init?.body ? { 'Content-Type': 'application/json' } : {}), ...init?.headers },
+      headers: { ...(init?.body ? { 'Content-Type': 'application/json' } : {}), ...(sessionStorage.getItem('studentsflow-token') ? { Authorization: `Bearer ${sessionStorage.getItem('studentsflow-token')}` } : {}), ...init?.headers },
     })
   } catch {
     throw new Error('Unable to reach FastAPI. Check that the backend is running and the API URL is configured.')
   }
   if (!response.ok) {
+    if (response.status === 401) {
+      sessionStorage.removeItem('studentsflow-token')
+      window.dispatchEvent(new Event('studentsflow:unauthorized'))
+    }
     let message = `Request failed (${response.status})`
     try {
       const body: unknown = await response.json()
@@ -40,9 +46,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  authMode: () => request<{ required: boolean }>('/auth/mode'),
+  login: async (username: string, password: string) => {
+    const result = await request<{ access_token: string; user_id: string; username: string; role: string }>(
+      '/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) })
+    sessionStorage.setItem('studentsflow-token', result.access_token)
+    sessionStorage.setItem('studentsflow-user', JSON.stringify({ user_id: result.user_id, username: result.username, role: result.role }))
+    return result
+  },
+  logout: () => { sessionStorage.removeItem('studentsflow-token'); sessionStorage.removeItem('studentsflow-user') },
   workflows: (limit = 50) => request<Workflow[]>(`/workflows?limit=${limit}`),
   workflow: (id: string) => request<Workflow>(`/workflows/${encodeURIComponent(id)}`),
   steps: (id: string) => request<PersistedStep[]>(`/workflows/${encodeURIComponent(id)}/steps`),
+  audit: (id: string) => request<AuditEvent[]>(`/workflows/${encodeURIComponent(id)}/audit`),
   kpis: () => request<Kpis>('/workflows/observability/kpis'),
   createWorkflow: (payload: WorkflowRequest) => request<Workflow>('/workflows', { method: 'POST', body: JSON.stringify(payload) }),
   approval: (workflowId: string, draftId: string, action: 'approve' | 'reject' | 'edit', details: { actor_id: string; subject?: string; body?: string; reason?: string }) =>

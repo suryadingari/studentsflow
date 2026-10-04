@@ -1,5 +1,7 @@
 """Evidence-linked student facts and validation results for Step 5."""
 
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
@@ -157,6 +159,7 @@ class ExtractedStudentInformation(BaseModel):
     evidence: list[Evidence] = Field(default_factory=list)
     source_references: list[SourceReference] = Field(default_factory=list)
     extraction_notes: list[str] = Field(default_factory=list)
+    additional_candidates: list[ExtractedStudentInformation] = Field(default_factory=list)
 
 
 class ValidationRequest(BaseModel):

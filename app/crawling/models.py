@@ -26,6 +26,11 @@ class SourceAccess(StrEnum):
     UNKNOWN = "unknown"
 
 
+class SourceOrigin(StrEnum):
+    USER_SUPPLIED = "user_supplied"
+    SEARCH_DISCOVERED = "search_discovered"
+
+
 class SourceCandidate(BaseModel):
     url: str
     domain: str
@@ -33,6 +38,7 @@ class SourceCandidate(BaseModel):
     reason: str = Field(min_length=1)
     access: SourceAccess
     discovery_metadata: dict[str, Any] = Field(default_factory=dict)
+    origin: SourceOrigin = SourceOrigin.USER_SUPPLIED
 
     @model_validator(mode="after")
     def url_domain_must_match(self) -> "SourceCandidate":
@@ -59,12 +65,16 @@ class SourceDiscoveryRequest(BaseModel):
     requirement: str = Field(min_length=1)
     candidates: list[SourceCandidate] = Field(default_factory=list)
     permitted_domains: frozenset[str] = Field(default_factory=frozenset)
+    search_enabled: bool = False
+    max_search_results: int = Field(default=10, ge=1, le=25)
 
 
 class SourceDiscoveryOutput(BaseModel):
     candidates: list[SourceCandidate] = Field(default_factory=list)
     rejected: list[RejectedSource] = Field(default_factory=list)
     note: str = "Source candidates do not establish facts about any person."
+    search_performed: bool = False
+    search_provider: str | None = None
 
 
 class CrawlConfiguration(BaseModel):

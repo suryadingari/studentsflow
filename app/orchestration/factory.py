@@ -15,9 +15,9 @@ from app.agents.implementations.source_discovery import SourceDiscoveryAgent
 from app.agents.implementations.student_crawler import StudentCrawlerAgent
 from app.agents.implementations.validation import ValidationAgent
 from app.crawling.models import CrawlResult
-from app.crawling.tool import MockCrawl4AITool
+from app.crawling.tool import MockCrawl4AITool, RealCrawl4AITool
 from app.core.config import settings
-from app.outreach.provider import MockEmailProvider
+from app.outreach.provider import MockEmailProvider, SMTPEmailProvider
 from app.outreach.services import (InMemoryOptOutService, InMemoryOutreachStore,
                                    InMemoryRateLimiter)
 from app.db.persistence import PostgresEventRecorder, PostgresWorkflowRepository
@@ -30,7 +30,9 @@ def create_demo_orchestrator(*, crawl_responses: Mapping[str, CrawlResult] | Non
                              event_recorder: EventRecorder | None = None,
                              allowed_domains: frozenset[str] | set[str] | None = None,
                              sessions: async_sessionmaker[AsyncSession] | None = None,
-                             database_url: str | None = None) -> WorkflowOrchestrator:
+                             database_url: str | None = None,
+                             real_crawl_for_live_workflows: bool = False,
+                             allow_real_email: bool = False) -> WorkflowOrchestrator:
     """Build the existing workflow using network-free crawl and email doubles."""
     registry = AgentRegistry()
     persistence = None
@@ -50,6 +52,8 @@ def create_demo_orchestrator(*, crawl_responses: Mapping[str, CrawlResult] | Non
     domains = frozenset(allowed_domains if allowed_domains is not None else settings.allowed_domain_set)
     registry.register(SourceDiscoveryAgent(allowed_domains=domains, **common))
     registry.register(StudentCrawlerAgent(crawl_tool=MockCrawl4AITool(crawl_responses),
+                                         real_tool=RealCrawl4AITool(),
+                                         use_real_in_live_workflows=real_crawl_for_live_workflows,
                                          allowed_domains=domains, **common))
     registry.register(ExtractionAgent(**common))
     registry.register(ValidationAgent(**common))
@@ -57,7 +61,15 @@ def create_demo_orchestrator(*, crawl_responses: Mapping[str, CrawlResult] | Non
     registry.register(EnrichmentAgent(**common))
     registry.register(MatchingAgent(**common))
     registry.register(draft_agent)
-    registry.register(OutreachAgent(provider=MockEmailProvider(), opt_out_service=opt_out,
+    real_provider = MockEmailProvider()
+    if allow_real_email and settings.email_provider.lower() == "smtp" and settings.smtp_is_configured:
+        real_provider = SMTPEmailProvider(
+            host=settings.smtp_host or "", port=settings.smtp_port,
+            from_email=settings.smtp_from_email or "", from_name=settings.smtp_from_name,
+            username=settings.smtp_username, password=settings.smtp_password)
+    demo_provider = (real_provider if isinstance(real_provider, MockEmailProvider)
+                     else MockEmailProvider())
+    registry.register(OutreachAgent(provider=real_provider, demo_provider=demo_provider, opt_out_service=opt_out,
                                     rate_limiter=InMemoryRateLimiter(),
                                     outreach_store=outreach_store, **common))
     registry.register(FollowUpAgent(outreach_store=outreach_store, opt_out_service=opt_out, **common))

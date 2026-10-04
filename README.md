@@ -67,7 +67,7 @@ Configure these application settings in the backend hosting environment (keep se
 
 The root `.gitignore` excludes `.env` and `.env.*` files (while allowing the safe `.env.example` templates), including frontend-local secret variants.
 
-`PORT` is supplied by some hosting platforms; it is consumed by the shell in the startup command below, not by an application setting. In the frontend build environment, set the existing Vite variable `VITE_API_BASE_URL` to the assigned HTTPS API URL. Vite embeds that URL into the build, so rebuild when the API URL changes. The checked-in `frontend/.env.example` remains a localhost development example.
+`PORT` is supplied by some hosting platforms; it is consumed by the shell in the startup command below, not by an application setting. In the frontend build environment, set the existing Vite variable `VITE_API_BASE_URL` to the assigned HTTPS API URL. Vite embeds that URL into the build, so rebuild when the API URL changes. The checked-in `frontend/.env.example` and localhost fallback are development-only; a production build requires `VITE_API_BASE_URL` and has no localhost fallback.
 
 Run `alembic upgrade head` as a release/migration step with the hosted `DATABASE_URL` configured, before starting the API. The online Alembic environment reads `DATABASE_URL` (or the configured settings file); the existing migration chain targets PostgreSQL. Do not run downgrade as part of deployment. Keep the platform's database hostname, credentials, TLS options, and backup policy in its protected configuration.
 
@@ -128,6 +128,16 @@ alembic upgrade head
 ```
 
 The persistence migration is reversible. Do not edit PostgreSQL tables manually; use Alembic revisions.
+
+For a local migration to Neon that must not use a localhost `.env`, run this single command from the repository root:
+
+```powershell
+python -m app.db.migrate_neon
+```
+
+It asks for the Neon `DATABASE_URL` with hidden terminal input, refuses hosts outside `*.neon.tech`, applies `alembic upgrade head`, and verifies `alembic_version` plus all SQLAlchemy application tables. The URL exists only in that process and is not written to `.env` or logged. Do not use this command with a local database URL.
+
+`GET /health` is the application liveness check. `GET /health/database` performs a PostgreSQL `SELECT 1` and reports database reachability separately; it returns a safe 503 when the database is unavailable. Workflow/database failures also return a generic 503 while a redacted server-side diagnostic records the failure type, SQLSTATE when available, and safe driver detail.
 
 ## Tests
 

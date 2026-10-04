@@ -14,7 +14,8 @@ export function FindCandidatesPage() {
     const title = String(data.get('title') || '').trim(); const description = String(data.get('description') || '').trim()
     const allowed = values(String(data.get('domains') || '')).map(item => item.toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, ''))
     const urls = values(String(data.get('sources') || ''))
-    if (!urls.length) { setError('Add at least one source URL. The current backend screens supplied sources and does not search the web automatically.'); setBusy(false); return }
+    const searchEnabled = data.get('search_enabled') === 'on'
+    if (!urls.length && !searchEnabled) { setError('Add at least one public source URL or enable configured source search.'); setBusy(false); return }
     const criteria: Criterion[] = [{ criterion_type: 'final_year', required: true }, { criterion_type: 'ai_interest', required: true }]
     const add = (field: string, kind: Criterion['criterion_type'], required: boolean) => values(String(data.get(field) || '')).forEach(value => criteria.push({ criterion_type: kind, value, required }))
     add('location', 'location', false); add('university', 'university', false); add('degree', 'degree', false); add('branch', 'branch', false)
@@ -28,13 +29,13 @@ export function FindCandidatesPage() {
     if (sources.some(source => source === null)) { setError('Every source must be a complete http or https URL.'); setBusy(false); return }
     const missing = [...new Set(sources.filter((source): source is NonNullable<typeof source> => source !== null).map(source => source.domain).filter(domain => !allowed.some(item => domain === item || domain.endsWith(`.${item}`))))]
     if (missing.length) { setError(`Add each source hostname to the permitted domains: ${missing.join(', ')}`); setBusy(false); return }
-    const payload: WorkflowRequest = { requirement: { raw_text: `${title}${description ? ` — ${description}` : ''}`, criteria }, sources: sources.filter((source): source is NonNullable<typeof source> => source !== null), permitted_domains: allowed, crawl_configuration: { allowed_domains: allowed, max_pages: 5, max_depth: 1 }, demo_mode: true }
+    const payload: WorkflowRequest = { requirement: { raw_text: `${title}${description ? ` — ${description}` : ''}`, criteria }, sources: sources.filter((source): source is NonNullable<typeof source> => source !== null), permitted_domains: allowed, crawl_configuration: { allowed_domains: allowed, max_pages: 5, max_depth: 1 }, demo_mode: data.get('demo_mode') === 'on', search_enabled: searchEnabled, max_search_results: 10 }
     try { const workflow = await api.createWorkflow(payload); setCreated(workflow.workflow_id); navigate(`/workflows/${encodeURIComponent(workflow.workflow_id)}`) }
     catch (e) { setError(e instanceof Error ? e.message : 'Unable to start workflow.') }
     finally { setBusy(false) }
   }
   return <><PageHeading eyebrow="DISCOVERY" title="Find candidates" subtitle="Define explicit criteria and submit public or authorized source URLs for evidence-based research." />
-    <div className="notice"><span className="notice-icon" aria-hidden="true">i</span><p>AI interest is an independent evidence requirement. The backend will not infer it from a degree, branch, institution, or generic programming skills. This workspace uses the configured demo/mock tools.</p></div>
+    <div className="notice"><span className="notice-icon" aria-hidden="true">i</span><p>AI interest is an independent evidence requirement. The backend will not infer it from a degree, branch, institution, or generic programming skills. Real public crawl is the default; mock mode is explicitly labeled for demonstrations.</p></div>
     {created && <div className="success-banner">Workflow created. <Link to={`/workflows/${encodeURIComponent(created)}`}>Open workflow</Link></div>}
     {error && <ErrorState error={error} />}
     <form className="form-layout" onSubmit={submit}>
@@ -48,7 +49,10 @@ export function FindCandidatesPage() {
         <div className="classification-note"><span aria-hidden="true">✓</span><span><strong>General AI interest or experience is the required baseline.</strong><br />Specializations such as Computer Vision, NLP, or Generative AI are optional filters and none is required by default. The backend validates status from source evidence.</span></div>
       </section>
       <aside className="form-aside"><section className="panel form-panel"><div className="panel-heading"><div><h2>Source scope</h2><p>Only include sources you may access.</p></div><span className="step-number">02</span></div>
-        <div className="field"><label htmlFor="sources">Source URLs <span className="required">*</span></label><textarea id="sources" name="sources" rows={6} required placeholder={'https://example.edu/profile\nhttps://github.com/example'} /><small>One URL per line. Source Discovery currently screens URLs you provide; it does not perform open web search. Do not submit private, restricted, or login-gated sources.</small></div>
+        <div className="field"><label htmlFor="sources">Permitted public source URLs</label><textarea id="sources" name="sources" rows={6} placeholder={'https://example.edu/profile\nhttps://github.com/example'} /><small>One URL per line. URL mode is always available. Do not submit private, restricted, or login-gated sources.</small></div>
+        <label className="checkbox-field"><input type="checkbox" name="search_enabled" /> Search configured provider within permitted domains</label>
+        <label className="checkbox-field"><input type="checkbox" name="demo_mode" /> Use explicit demo/mock crawl (no network)</label>
+        <small>Search is reported as unavailable unless the backend search provider is configured. The backend never claims search occurred when it did not.</small>
         <div className="field"><label htmlFor="source_type">Source type</label><select id="source_type" name="source_type" defaultValue="public_profile"><option value="public_profile">Public profile</option><option value="portfolio">Portfolio</option><option value="code_repository">Code repository</option><option value="research_publication">Research publication</option><option value="university_page">University page</option><option value="other">Other</option></select></div>
         <div className="field"><label htmlFor="source_access">Access status</label><select id="source_access" name="source_access" defaultValue="public"><option value="public">Public</option><option value="authorized">Authorized</option></select></div>
         <div className="field"><label htmlFor="domains">Permitted domains <span className="required">*</span></label><input id="domains" name="domains" required placeholder="example.edu, github.com" /><small>The server's allowed-domain policy must also permit each domain.</small></div>

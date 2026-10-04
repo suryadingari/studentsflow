@@ -95,6 +95,7 @@ class PostgresWorkflowRepository:
                     setattr(req, name, value)
             workflow = await session.get(WorkflowRecord, result.workflow_id)
             values = {
+                "owner_id": request.owner_id,
                 "requirement_id": result.requirement_id, "status": result.status.value,
                 "current_step": result.current_step.value if result.current_step else None,
                 "created_at": result.created_at, "updated_at": result.updated_at,
@@ -389,12 +390,25 @@ class PostgresWorkflowRepository:
             hop_count = int((row.runtime_json or {}).get("hop_count", 0))
             return request, result, hop_count
 
-    async def list_workflows(self, *, limit: int = 50, offset: int = 0) -> list[WorkflowResult]:
+    async def list_workflows(self, *, limit: int = 50, offset: int = 0,
+                             owner_id: str | None = None, include_all: bool = False) -> list[WorkflowResult]:
         self.ensure_configured()
         async with self.sessions() as session:
-            rows = (await session.scalars(select(WorkflowRecord).order_by(
+            query = select(WorkflowRecord)
+            if not include_all:
+                query = query.where(WorkflowRecord.owner_id == owner_id)
+            rows = (await session.scalars(query.order_by(
                 WorkflowRecord.created_at.desc()).limit(min(max(limit, 1), 200)).offset(max(offset, 0)))).all()
             return [WorkflowResult.model_validate(row.result_json) for row in rows]
+
+    async def can_access_workflow(self, workflow_id: str, *, owner_id: str,
+                                  is_admin: bool = False) -> bool:
+        self.ensure_configured()
+        async with self.sessions() as session:
+            workflow = await session.get(WorkflowRecord, workflow_id)
+            if workflow is None:
+                return False
+            return is_admin or workflow.owner_id == owner_id
 
     async def list_steps(self, workflow_id: str) -> list[dict[str, Any]]:
         self.ensure_configured()

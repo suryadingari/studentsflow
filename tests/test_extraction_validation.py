@@ -109,6 +109,22 @@ def test_python_alone_does_not_support_ai_interest():
     assert result.ai_interest_status == AIInterestStatus.AI_INTEREST_NOT_FOUND
 
 
+def test_html_source_and_multiple_explicit_name_sections_produce_separate_evidence_profiles():
+    content = ("<main><section><h2>Name: Alex Student</h2><p>Expected graduation: 2027</p>"
+               "<p>Project: Computer Vision traffic sign classifier</p></section>"
+               "<section><h2>Name: Sam Student</h2><p>Current academic year: third year</p>"
+               "<p>Project: CAD machine design</p></section><script>Name: Fake</script></main>")
+    result = run(ExtractionAgent().execute(
+        AgentInput[CrawlResult](payload=crawl(content)), AgentContext())).result
+
+    assert result.profile.name.value == "Alex Student"
+    assert len(result.additional_candidates) == 1
+    second = result.additional_candidates[0]
+    assert second.profile.name.value == "Sam Student"
+    assert second.profile.projects[0].value == "CAD machine design"
+    assert all("Fake" not in evidence.supporting_text for evidence in [*result.evidence, *second.evidence])
+
+
 def test_keyword_without_personal_activity_is_unverified():
     _, result = extract_and_validate("This course introduces artificial intelligence concepts.")
     assert result.ai_interest_status == AIInterestStatus.AI_INTEREST_UNVERIFIED

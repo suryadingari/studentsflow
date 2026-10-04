@@ -13,6 +13,16 @@ class Settings(BaseSettings):
     allowed_domains: str = ""
     cors_allowed_origins: str = ""
     crawl4ai_base_directory: str | None = None
+    google_cse_api_key: str | None = None
+    google_cse_search_engine_id: str | None = None
+    email_provider: str = "mock"
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_from_email: str | None = None
+    smtp_from_name: str = "Research Team"
+    auth_secret_key: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -45,6 +55,10 @@ class Settings(BaseSettings):
         if self.app_env.lower() == "development" and "http://localhost:5173" not in origins:
             origins.append("http://localhost:5173")
         return origins
+
+    @property
+    def smtp_is_configured(self) -> bool:
+        return bool(self.smtp_host and self.smtp_port and self.smtp_from_email)
 
 
 @lru_cache

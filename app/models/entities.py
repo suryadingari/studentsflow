@@ -22,6 +22,18 @@ class RequirementRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
 
 
+class UserAccountRecord(Base):
+    __tablename__ = "user_accounts"
+    __table_args__ = (CheckConstraint("role IN ('user','admin')", name="ck_user_accounts_role"),)
+
+    user_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    username: Mapped[str] = mapped_column(String(190), unique=True, nullable=False, index=True)
+    password_hash: Mapped[str] = mapped_column(String(300), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="user")
+    is_active: Mapped[bool] = mapped_column(nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+
+
 class WorkflowRecord(Base):
     __tablename__ = "workflows"
     __table_args__ = (
@@ -30,6 +42,7 @@ class WorkflowRecord(Base):
     )
 
     workflow_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    owner_id: Mapped[str | None] = mapped_column(ForeignKey("user_accounts.user_id", ondelete="SET NULL"), index=True)
     requirement_id: Mapped[str] = mapped_column(ForeignKey("requirements.requirement_id", ondelete="RESTRICT"), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     current_step: Mapped[str | None] = mapped_column(String(40))
@@ -314,5 +327,5 @@ __all__ = [
     "EmailDraftRecord", "EmailDraftVersionRecord", "FollowUpPlanRecord", "KPIMetricRecord",
     "MatchRecord", "OptOutRecordModel", "OutreachEventRecord", "OutreachRecord",
     "ReplyRecordModel", "RequirementRecord", "StudentEvidenceRecord", "StudentRecord", "StudentSourceRecord",
-    "ToolCallRecord", "WorkflowRecord", "WorkflowStepRecord",
+    "ToolCallRecord", "UserAccountRecord", "WorkflowRecord", "WorkflowStepRecord",
 ]
