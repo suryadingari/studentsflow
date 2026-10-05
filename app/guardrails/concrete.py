@@ -83,7 +83,7 @@ class NoHallucinationGuardrail:
         if not output.success or not output.result:
             return
         result = output.result
-        
+
         def check_profile(profile, evidence_list):
             valid_evidence_ids = {e.evidence_id for e in evidence_list}
             facts = [profile.name, profile.university, profile.degree, profile.branch,
@@ -110,14 +110,14 @@ class HumanApprovalGuardrail:
             draft = payload.draft
             if getattr(draft, "status", None) != EmailDraftStatus.APPROVED:
                 raise NonRetryableFailure("Email draft is not approved.")
-            
+
             has_human_approval = False
             if hasattr(draft, "approvals") and draft.approvals:
                 last_action = draft.approvals[-1]
                 if (last_action.action == ApprovalActionType.APPROVE
                     and last_action.actor_id.strip().lower() not in {"email-agent", "outreach-agent", "system", "agent"}):
                     has_human_approval = True
-                    
+
             if not has_human_approval:
                 raise NonRetryableFailure("Email draft lacks human approval.")
 
@@ -172,7 +172,7 @@ class DuplicateWorkGuardrail:
     async def validate_input(self, agent_input: AgentInput, context: AgentContext) -> None:
         if not context.idempotency_key:
             raise NonRetryableFailure("Idempotency key is missing from context.")
-            
+
     async def validate_output(self, output: AgentOutput, context: AgentContext) -> None:
         pass
 

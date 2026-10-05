@@ -18,7 +18,7 @@ class ResearchRequest(BaseModel):
     search_enabled: bool = False
     max_search_results: int = Field(default=10, ge=1, le=25)
     crawl_configuration: CrawlConfiguration = Field(default_factory=CrawlConfiguration)
-    
+
     max_iterations: int = Field(default=3, ge=1, le=10)
     max_sources: int = Field(default=20, ge=1, le=50)
     max_pages: int = Field(default=50, ge=1, le=100)
