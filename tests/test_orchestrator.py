@@ -1,6 +1,7 @@
 """Deterministic integration checks for process-local Step 10 orchestration."""
 
 import asyncio
+import time
 from datetime import datetime, timezone
 from types import MethodType
 
@@ -97,8 +98,7 @@ def test_workflow_runs_existing_agents_in_canonical_order_and_pauses():
     orchestrator = ready_orchestrator()
     result = run(orchestrator.start(workflow_request()))
     types = [step.step_type for step in result.steps]
-    expected = [WorkflowStepType.SOURCE_DISCOVERY, WorkflowStepType.STUDENT_CRAWLING,
-                WorkflowStepType.EXTRACTION, WorkflowStepType.VALIDATION,
+    expected = [WorkflowStepType.RESEARCH,
                 WorkflowStepType.DEDUPLICATION, WorkflowStepType.ENRICHMENT,
                 WorkflowStepType.MATCHING, WorkflowStepType.EMAIL_DRAFTING,
                 WorkflowStepType.HUMAN_APPROVAL]
@@ -334,9 +334,9 @@ def test_retry_policy_retries_retryable_agent_failure_and_records_count():
 
     agent._execute = MethodType(transient, agent)
     result = run(orchestrator.start(workflow_request()))
-    extraction_step = next(step for step in result.steps if step.step_type == WorkflowStepType.EXTRACTION)
+    research_step = next(step for step in result.steps if step.step_type == WorkflowStepType.RESEARCH)
     assert calls == 2
-    assert extraction_step.retry_count == 1
+    assert research_step.retry_count == 1
     assert result.metrics.steps_retried == 1
 
 
@@ -405,7 +405,7 @@ def test_health_endpoint_still_returns_200():
     assert response.json() == {"status": "ok"}
 
 
-def test_fastapi_reports_missing_postgresql_configuration(monkeypatch):
+def test_fastapi_uses_local_fallback_for_placeholder_configuration(monkeypatch):
     from fastapi.testclient import TestClient
     from app.core.config import settings
 
@@ -416,6 +416,7 @@ def test_fastapi_reports_missing_postgresql_configuration(monkeypatch):
         "postgresql+psycopg://username:password@localhost:5432/database_name",
     )
     with TestClient(app) as client:
+        mode = client.get("/auth/mode")
         response = client.post("/workflows", json={
             "requirement": {"requirement_id": "api-req", "criteria": [
                 {"criterion_type": "final_year"},
@@ -424,11 +425,21 @@ def test_fastapi_reports_missing_postgresql_configuration(monkeypatch):
             "sources": [],
             "permitted_domains": [],
             "demo_mode": True,
-    })
-    assert response.status_code == 503
-    assert response.json()["detail"] == (
-        "PostgreSQL operation failed; check server logs for a redacted diagnostic."
-    )
+        })
+        workflows_response = client.get("/workflows")
+        workflow_id = response.json()["workflow_id"]
+        workflow_detail = client.get(f"/workflows/{workflow_id}")
+        for _ in range(50):
+            if workflow_detail.json()["status"] != "running":
+                break
+            time.sleep(0.02)
+            workflow_detail = client.get(f"/workflows/{workflow_id}")
+    assert mode.status_code == 200
+    assert mode.json() == {"required": False}
+    assert response.status_code == 201
+    assert workflows_response.status_code == 200
+    assert workflow_detail.status_code == 200
+    assert workflow_detail.json()["status"] == "completed"
 
 
 @pytest.mark.parametrize("action", [ApprovalActionType.APPROVE, ApprovalActionType.REJECT])

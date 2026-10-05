@@ -9,6 +9,7 @@ from app.crawling.policy import DomainPolicy
 
 
 class SourceType(StrEnum):
+    SYNTHETIC_DEMO = "synthetic_demo"
     PUBLIC_PROFILE = "public_profile"
     PORTFOLIO = "portfolio"
     CODE_REPOSITORY = "code_repository"

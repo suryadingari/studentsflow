@@ -185,8 +185,6 @@ async def _exercise_restart(database_url: str, *, monkeypatch=None,
     if database_url.startswith("sqlite+aiosqlite:///"):
         if monkeypatch is None:
             raise AssertionError("SQLite adapter tests must remain explicitly labelled and isolated")
-        monkeypatch.setattr("app.db.persistence.validate_database_url", lambda url: url)
-        monkeypatch.setattr("app.outreach.persistence.validate_database_url", lambda url: url)
     engine = create_async_engine(database_url)
     try:
         if create_schema:

@@ -9,13 +9,14 @@ from sqlalchemy import func, select
 
 from app.auth.security import hash_password
 from app.core.config import settings
-from app.db.persistence import validate_database_url
+from app.db.persistence import validate_storage_url
 from app.db.session import SessionFactory
 from app.models import UserAccountRecord
 
 
 async def main() -> int:
-    validate_database_url(settings.database_url)
+    validate_storage_url(settings.effective_database_url,
+                         allow_sqlite=settings.initializes_local_schema)
     username = input("Initial administrator username: ").strip().lower()
     password = getpass.getpass("Administrator password (hidden): ")
     confirmation = getpass.getpass("Confirm password (hidden): ")

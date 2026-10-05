@@ -9,15 +9,22 @@ from app.core.config import settings
 from app.core.logging import configure_logging
 from app.orchestration import create_demo_orchestrator
 from app.api.routes import workflows
-from app.db.session import SessionFactory
+from app.db.persistence import validate_database_url
+from app.db.session import SessionFactory, database_url, initialize_local_schema
 
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     configure_logging(settings.log_level)
+    if settings.initializes_local_schema:
+        await initialize_local_schema()
+    else:
+        # Production never falls back to SQLite or blindly creates the schema.
+        validate_database_url(database_url)
     application.state.workflow_orchestrator = create_demo_orchestrator(
-        sessions=SessionFactory, database_url=settings.database_url,
-        real_crawl_for_live_workflows=True, allow_real_email=True)
+        sessions=SessionFactory, database_url=database_url,
+        include_synthetic_demo=True,
+        real_crawl_for_live_workflows=True, allow_real_email=False)
     yield
 
 
@@ -43,6 +50,6 @@ async def security_headers(request, call_next):
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-    if settings.app_env.lower() != "development":
+    if not settings.is_local_demo:
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
     return response

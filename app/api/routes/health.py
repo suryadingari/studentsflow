@@ -4,8 +4,8 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.config import settings
 from app.core.logging import log_database_failure
-from app.db.persistence import DatabaseConfigurationError, validate_database_url
-from app.db.session import engine
+from app.db.persistence import DatabaseConfigurationError, validate_storage_url
+from app.db.session import database_url, engine
 
 router = APIRouter()
 
@@ -19,7 +19,7 @@ async def health_check() -> dict[str, str]:
 async def database_health_check() -> dict[str, str]:
     """Report database readiness separately from application liveness."""
     try:
-        validate_database_url(settings.database_url)
+        validate_storage_url(database_url, allow_sqlite=settings.initializes_local_schema)
         async with engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
     except (DatabaseConfigurationError, SQLAlchemyError) as error:

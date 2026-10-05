@@ -1,17 +1,19 @@
 from logging.config import fileConfig
-import os
-
 from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+from app.core.config import settings
 from app.db.base import Base
-from app.db.persistence import validate_database_url
+from app.db.persistence import validate_storage_url
 import app.models  # noqa: F401
 
 config = context.config
-database_url = validate_database_url(os.getenv("DATABASE_URL", settings.database_url))
+database_url = validate_storage_url(
+    settings.effective_database_url,
+    allow_sqlite=settings.initializes_local_schema,
+)
 if database_url.startswith("postgresql://"):
     database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
 config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))

@@ -11,14 +11,15 @@ from app.agents.exceptions import HopLimitExceeded
 from app.agents.models import AgentInput, AgentOutput
 from app.agents.registry import AgentRegistry
 from app.agents.implementations.email import EmailApprovalService
-from app.crawling.models import SourceDiscoveryOutput, SourceDiscoveryRequest, StudentCrawlerRequest
+from app.crawling.models import SourceDiscoveryOutput
 from app.orchestration.transitions import validate_transition
 from app.schemas.canonical import CanonicalStudent, DeduplicationRequest, EnrichmentRequest
 from app.schemas.email import (ApprovalAction, ApprovalActionType, EmailApprovalRequest, EmailDraft,
                                EmailDraftRequest, EmailDraftStatus)
 from app.schemas.matching import MatchingRequest
 from app.schemas.outreach import FollowUpRequest, FollowUpResult, OutreachRequest, OutreachResult
-from app.schemas.student import ExtractedStudentInformation, StudentValidationResult, ValidationRequest
+from app.schemas.student import ExtractedStudentInformation, StudentValidationResult
+from app.schemas.research import ResearchRequest
 from app.schemas.workflow import (WorkflowMetrics, WorkflowRequest, WorkflowResult, WorkflowStatus,
                                   WorkflowStep, WorkflowStepStatus, WorkflowStepType, now_utc)
 from app.db.persistence import PostgresWorkflowRepository
@@ -42,6 +43,7 @@ class _Runtime:
     outreach_results: list[OutreachResult] = field(default_factory=list)
     follow_up_results: list[FollowUpResult] = field(default_factory=list)
     hop_count: int = 0
+    defer_snapshot_persistence: bool = False
     step_keys: dict[str, WorkflowStep] = field(default_factory=dict)
 
 
@@ -100,6 +102,7 @@ class WorkflowOrchestrator:
         now = now_utc()
         result = WorkflowResult(workflow_id=workflow_id, job_id=workflow_id,
                                 requirement_id=requirement_id,
+                                synthetic_demo_dataset=request.synthetic_demo_dataset,
                                 status=WorkflowStatus.CREATED, created_at=now, updated_at=now)
         runtime = _Runtime(result=result, request=request)
         self.store.add(runtime)
@@ -111,6 +114,15 @@ class WorkflowOrchestrator:
         return runtime
 
     async def _execute_runtime(self, runtime: _Runtime) -> None:
+        buffered = (getattr(self.event_recorder, "buffered", None)
+                    if runtime.request.synthetic_demo_dataset else None)
+        if buffered is not None:
+            async with buffered():
+                await self._execute_runtime_safely(runtime)
+            return
+        await self._execute_runtime_safely(runtime)
+
+    async def _execute_runtime_safely(self, runtime: _Runtime) -> None:
         try:
             await self._run_until_approval(runtime)
         except HopLimitExceeded as error:
@@ -200,88 +212,69 @@ class WorkflowOrchestrator:
 
     async def _run_until_approval(self, runtime: _Runtime) -> None:
         request = runtime.request
-        discovered: SourceDiscoveryOutput = await self._invoke(
-            runtime, WorkflowStepType.SOURCE_DISCOVERY, "source_discovery",
-            SourceDiscoveryRequest(requirement=request.requirement.raw_text or request.requirement.model_dump_json(),
-                                   candidates=request.sources, permitted_domains=request.permitted_domains,
-                                   search_enabled=request.search_enabled,
-                                   max_search_results=request.max_search_results),
-            logical_item_id="sources")
+        research = await self._invoke(
+            runtime, WorkflowStepType.RESEARCH, "research",
+            ResearchRequest(
+                requirement=request.requirement.raw_text or request.requirement.model_dump_json(),
+                current_year=request.current_year,
+                candidates=request.sources,
+                permitted_domains=request.permitted_domains,
+                search_enabled=request.search_enabled,
+                max_search_results=request.max_search_results,
+                crawl_configuration=request.crawl_configuration,
+            ),
+            logical_item_id="candidate-research",
+            tool_grants=request.permitted_tools)
+        discovered: SourceDiscoveryOutput = research.source_discovery or SourceDiscoveryOutput()
         runtime.result.source_discovery = discovered.model_copy(deep=True)
+        for agent_name in ("source_discovery", "student_crawler", "extraction", "validation"):
+            runtime.result.agent_versions[agent_name] = self.registry.get_version(agent_name)
         for source in discovered.candidates:
             await self._audit(runtime, AgentEventType.SOURCE_DISCOVERED,
                               agent_name="source_discovery", agent_version="2.1.0",
                               details={"url": source.url, "origin": source.origin.value,
                                        "provider": source.discovery_metadata.get("provider")})
-        crawls = []
-        for source in discovered.candidates:
-            if runtime.result.status != WorkflowStatus.RUNNING:
-                return
-            try:
-                output = await self._invoke(
-                    runtime, WorkflowStepType.STUDENT_CRAWLING, "student_crawler",
-                    StudentCrawlerRequest(source_url=source.url,
-                                          permitted_domains=request.permitted_domains,
-                                          configuration=request.crawl_configuration),
-                    logical_item_id=source.url,
-                    tool_grants=request.permitted_tools)
-                crawls.extend(output.results)
-                for crawl_result in output.results:
-                    await self._audit(
-                        runtime,
-                        AgentEventType.SOURCE_CRAWLED if crawl_result.success else AgentEventType.CRAWL_FAILED,
-                        agent_name="student_crawler", agent_version="2.0.0",
-                        details={"url": crawl_result.requested_url,
-                                 "status_code": crawl_result.status_code,
-                                 "error_code": crawl_result.error.code.value if crawl_result.error else None,
-                                 "tool": crawl_result.provenance.tool_name,
-                                 "tool_version": crawl_result.provenance.tool_version})
-            except _ItemFailure as error:
-                runtime.result.errors.append(f"Student crawler failed for {source.url}: {error}")
+        crawls = research.crawl_results
+        runtime.result.errors.extend(research.errors)
+        for crawl_result in crawls:
+            await self._audit(
+                runtime,
+                AgentEventType.SOURCE_CRAWLED if crawl_result.success else AgentEventType.CRAWL_FAILED,
+                agent_name="student_crawler", agent_version="2.0.0",
+                details={"url": crawl_result.requested_url,
+                         "status_code": crawl_result.status_code,
+                         "error_code": crawl_result.error.code.value if crawl_result.error else None,
+                         "tool": crawl_result.provenance.tool_name,
+                         "tool_version": crawl_result.provenance.tool_version})
         # Preserve crawl provenance and errors but avoid retaining whole page bodies;
         # extracted claim snippets remain attached to their evidence records.
         runtime.result.crawl_results = [item.model_copy(update={"raw_content": None}, deep=True)
                                         for item in crawls]
-        extracted: list[ExtractedStudentInformation] = []
-        for crawl in (item for item in crawls if item.success):
-            try:
-                extracted_item = await self._invoke(
-                    runtime, WorkflowStepType.EXTRACTION, "extraction", crawl,
-                    logical_item_id=crawl.requested_url)
-                extracted.extend(_flatten_extracted(extracted_item))
-                for record in _flatten_extracted(extracted_item):
-                    await self._audit(
-                        runtime, AgentEventType.CANDIDATE_EXTRACTED,
-                        agent_name="extraction", agent_version="2.0.0",
-                        details={"source_url": crawl.requested_url,
-                                 "evidence_count": len(record.evidence),
-                                 "student_reference": record.profile.student_reference})
-                    for evidence in record.evidence:
-                        await self._audit(
-                            runtime, AgentEventType.EVIDENCE_CREATED,
-                            agent_name="extraction", agent_version="2.0.0",
-                            details={"evidence_id": evidence.evidence_id,
-                                     "claim_type": evidence.claim_type.value,
-                                     "source_url": str(evidence.source_url)})
-            except _ItemFailure as error:
-                runtime.result.errors.append(str(error))
+        extracted: list[ExtractedStudentInformation] = research.extracted_profiles
+        for record in extracted:
+            source_url = str(record.source_references[0].source_url) if record.source_references else "unknown"
+            await self._audit(
+                runtime, AgentEventType.CANDIDATE_EXTRACTED,
+                agent_name="extraction", agent_version="2.0.0",
+                details={"source_url": source_url,
+                         "evidence_count": len(record.evidence),
+                         "student_reference": record.profile.student_reference})
+            for evidence in record.evidence:
+                await self._audit(
+                    runtime, AgentEventType.EVIDENCE_CREATED,
+                    agent_name="extraction", agent_version="2.0.0",
+                    details={"evidence_id": evidence.evidence_id,
+                             "claim_type": evidence.claim_type.value,
+                             "source_url": str(evidence.source_url)})
         runtime.result.extracted_profiles = [item.model_copy(deep=True) for item in extracted]
         runtime.result.metrics.candidates_discovered = len(extracted)
-        for item in extracted:
-            try:
-                runtime.validated.append(await self._invoke(
-                    runtime, WorkflowStepType.VALIDATION, "validation",
-                    ValidationRequest(extracted=item, current_year=request.current_year,
-                                      research_complete=bool(crawls) and all(crawl.success for crawl in crawls)),
-                    logical_item_id=str(item.source_references[0].source_url) if item.source_references else "unknown"))
-                validated_item = runtime.validated[-1]
-                await self._audit(runtime, AgentEventType.CANDIDATE_VALIDATED,
-                                  agent_name="validation", agent_version="2.0.0",
-                                  details={"final_year_status": validated_item.final_year_status.value,
-                                           "ai_interest_status": validated_item.ai_interest_status.value,
-                                           "evidence_count": len(validated_item.evidence_references)})
-            except _ItemFailure as error:
-                runtime.result.errors.append(str(error))
+        runtime.validated = research.validated_candidates
+        for validated_item in runtime.validated:
+            await self._audit(runtime, AgentEventType.CANDIDATE_VALIDATED,
+                              agent_name="validation", agent_version="2.0.0",
+                              details={"final_year_status": validated_item.final_year_status.value,
+                                       "ai_interest_status": validated_item.ai_interest_status.value,
+                                       "evidence_count": len(validated_item.evidence_references)})
         runtime.result.metrics.candidates_validated = len(runtime.validated)
         runtime.result.validated_profiles = [item.model_copy(deep=True) for item in runtime.validated]
         dedup = await self._invoke(runtime, WorkflowStepType.DEDUPLICATION, "deduplication",
@@ -297,17 +290,30 @@ class WorkflowOrchestrator:
                                        "decision": decision.decision.value})
         runtime.result.canonical_students = [item.model_copy(deep=True) for item in runtime.canonical_students]
         enriched: list[CanonicalStudent] = []
-        for student in runtime.canonical_students:
-            try:
-                item = await self._invoke(
-                    runtime, WorkflowStepType.ENRICHMENT, "enrichment",
-                    EnrichmentRequest(canonical_student=student, additions=[]),
-                    logical_item_id=student.canonical_id)
-                enriched.append(item.canonical_student)
-            except _ItemFailure as error:
-                runtime.result.errors.append(str(error))
-                enriched.append(student)
+        runtime.defer_snapshot_persistence = request.synthetic_demo_dataset
+        try:
+            # The deterministic demo dataset has no external enrichment sources.
+            # Run the existing no-op EnrichmentAgent once to exercise/version the
+            # stage, then pass the other already-complete synthetic records through
+            # unchanged instead of creating 499 redundant no-op executions.
+            enrichment_batch = (runtime.canonical_students[:1]
+                                if request.synthetic_demo_dataset else runtime.canonical_students)
+            for student in enrichment_batch:
+                try:
+                    item = await self._invoke(
+                        runtime, WorkflowStepType.ENRICHMENT, "enrichment",
+                        EnrichmentRequest(canonical_student=student, additions=[]),
+                        logical_item_id=student.canonical_id)
+                    enriched.append(item.canonical_student)
+                except _ItemFailure as error:
+                    runtime.result.errors.append(str(error))
+                    enriched.append(student)
+            if request.synthetic_demo_dataset:
+                enriched.extend(runtime.canonical_students[1:])
+        finally:
+            runtime.defer_snapshot_persistence = False
         runtime.canonical_students = enriched
+        await self._persist(runtime)
         matching = await self._invoke(runtime, WorkflowStepType.MATCHING, "matching",
                                       MatchingRequest(requirement=request.requirement,
                                                       candidates=runtime.canonical_students),
@@ -322,41 +328,52 @@ class WorkflowOrchestrator:
                                        "match_score": match.match_score})
         runtime.result.metrics.candidates_matched = sum(
             1 for match in matching.candidate_matches if match.status.value == "match")
-        for student in runtime.canonical_students:
-            match = runtime.matches.get(student.canonical_id)
-            if match is None:
-                continue
-            try:
-                recipient = None
-                contact = student.profile.public_contact
-                if contact is not None:
-                    from app.schemas.email import EmailRecipient
-                    evidence = next((e for e in student.profile.evidence
-                                     if e.claim_type.value == "public_contact"
-                                     and e.evidence_id in contact.evidence_ids), None)
-                    if evidence is not None:
-                        recipient = EmailRecipient(email=str(contact.value), evidence_id=evidence.evidence_id)
-                draft_result = await self._invoke(
-                    runtime, WorkflowStepType.EMAIL_DRAFTING, "email",
-                    EmailDraftRequest(request_id=f"{runtime.result.workflow_id}:{student.canonical_id}",
-                                      requirement=request.requirement, candidate=student, match=match,
-                                      recipient=recipient, signature=request.signature),
-                    logical_item_id=student.canonical_id)
-                draft = draft_result.draft
-                runtime.drafts[draft.draft_id] = draft
-                runtime.draft_candidates[draft.draft_id] = (student, match)
-                runtime.result.drafts.append(draft)
-                runtime.result.metrics.emails_drafted += 1
-                if draft.status == EmailDraftStatus.PENDING_REVIEW:
-                    runtime.result.pending_draft_ids.append(draft.draft_id)
-            except _ItemFailure as error:
-                runtime.result.errors.append(str(error))
+        runtime.defer_snapshot_persistence = request.synthetic_demo_dataset
+        try:
+            for student in runtime.canonical_students:
+                match = runtime.matches.get(student.canonical_id)
+                if match is None:
+                    continue
+                try:
+                    recipient = None
+                    contact = student.profile.public_contact
+                    if contact is not None:
+                        from app.schemas.email import EmailRecipient
+                        evidence = next((e for e in student.profile.evidence
+                                         if e.claim_type.value == "public_contact"
+                                         and e.evidence_id in contact.evidence_ids), None)
+                        if evidence is not None:
+                            recipient = EmailRecipient(email=str(contact.value), evidence_id=evidence.evidence_id)
+                    # The synthetic dataset intentionally provides contact details
+                    # for only a small subset. Avoid creating empty blocked drafts
+                    # for the other fictional candidates in this local-only demo.
+                    if request.synthetic_demo_dataset and recipient is None:
+                        continue
+                    draft_result = await self._invoke(
+                        runtime, WorkflowStepType.EMAIL_DRAFTING, "email",
+                        EmailDraftRequest(request_id=f"{runtime.result.workflow_id}:{student.canonical_id}",
+                                          requirement=request.requirement, candidate=student, match=match,
+                                          recipient=recipient, signature=request.signature),
+                        logical_item_id=student.canonical_id)
+                    draft = draft_result.draft
+                    runtime.drafts[draft.draft_id] = draft
+                    runtime.draft_candidates[draft.draft_id] = (student, match)
+                    runtime.result.drafts.append(draft)
+                    runtime.result.metrics.emails_drafted += 1
+                    if draft.status == EmailDraftStatus.PENDING_REVIEW:
+                        runtime.result.pending_draft_ids.append(draft.draft_id)
+                except _ItemFailure as error:
+                    runtime.result.errors.append(str(error))
+        finally:
+            runtime.defer_snapshot_persistence = False
+        await self._persist(runtime)
         self._make_approval_step(runtime)
         if runtime.result.pending_draft_ids:
             self._transition(runtime, WorkflowStatus.WAITING_FOR_APPROVAL)
             runtime.result.current_step = WorkflowStepType.HUMAN_APPROVAL
             # Persist the approval step before audit events reference its step_id.
-            await self._persist(runtime)
+            if not request.synthetic_demo_dataset:
+                await self._persist(runtime)
             for draft_id in runtime.result.pending_draft_ids:
                 await self._audit(runtime, AgentEventType.WORKFLOW_APPROVAL_REQUESTED,
                                   step_id=self._step_id_for(runtime, draft_id), details={"draft_id": draft_id})
@@ -568,7 +585,7 @@ class WorkflowOrchestrator:
         runtime.result.updated_at = now_utc()
 
     async def _persist(self, runtime: _Runtime) -> None:
-        if self.persistence is not None:
+        if self.persistence is not None and not runtime.defer_snapshot_persistence:
             await self.persistence.save_workflow(runtime.result, runtime.request,
                                                  hop_count=runtime.hop_count)
 
@@ -644,10 +661,3 @@ class WorkflowOrchestrator:
 
 class _ItemFailure(Exception):
     """Marks a candidate/source-local failure that need not abort sibling items."""
-
-
-def _flatten_extracted(item: ExtractedStudentInformation) -> list[ExtractedStudentInformation]:
-    output = [item.model_copy(update={"additional_candidates": []}, deep=True)]
-    for child in item.additional_candidates:
-        output.extend(_flatten_extracted(child))
-    return output

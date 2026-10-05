@@ -10,6 +10,7 @@ from app.agents.base import BaseAgent
 from app.agents.context import AgentContext
 from app.agents.models import AgentInput
 from app.crawling.models import CrawlResult
+from app.crawling.demo_fixture import SYNTHETIC_DEMO_DOMAIN, SYNTHETIC_DEMO_TOOL_VERSION
 from app.schemas.student import (
     AIEvidenceCategory, ClaimType, Evidence, EvidenceStrength, EvidenceType,
     ExtractedStudentInformation, FinalYearStatus, SourceReference, SourcedFact,
@@ -90,21 +91,42 @@ class ExtractionAgent(BaseAgent):
         if not isinstance(crawl, CrawlResult):
             crawl = CrawlResult.model_validate(crawl)
         readable = _readable_text(crawl.raw_content or "")
+        synthetic_demo = crawl.provenance.tool_version == SYNTHETIC_DEMO_TOOL_VERSION
         candidate_sections = _split_named_candidate_sections(readable)
         if len(candidate_sections) > 1:
             records = []
             for section in candidate_sections:
-                child = crawl.model_copy(update={"raw_content": section}, deep=True)
+                updates = {"raw_content": section}
+                if synthetic_demo:
+                    record_id = _synthetic_record_id(section)
+                    if record_id is None:
+                        continue
+                    source_url = f"https://{SYNTHETIC_DEMO_DOMAIN}/candidates/{record_id}"
+                    provenance = crawl.provenance.model_copy(update={
+                        "source_url": source_url, "final_url": source_url,
+                        "domain": SYNTHETIC_DEMO_DOMAIN,
+                    }, deep=True)
+                    updates.update(requested_url=source_url, final_url=source_url,
+                                   provenance=provenance)
+                child = crawl.model_copy(update=updates, deep=True)
                 records.append(await self._execute(AgentInput(payload=child), context))
+            if not records:
+                return ExtractedStudentInformation(extraction_notes=[
+                    "Synthetic demo page contained no valid candidate record identifiers."])
             primary = records[0]
             return primary.model_copy(update={"additional_candidates": records[1:]}, deep=True)
         source_url = crawl.requested_url
-        source_type = _source_type(source_url, crawl.page_title)
+        source_type = (EvidenceType.SYNTHETIC_DEMO if synthetic_demo
+                       else _source_type(source_url, crawl.page_title))
+        record_id = _synthetic_record_id(readable) if synthetic_demo else None
         source = SourceReference(
             source_url=source_url,
             final_url=crawl.final_url,
             title=crawl.page_title,
             evidence_type=source_type,
+            source_type="synthetic_demo" if synthetic_demo else "public_or_authorized",
+            is_synthetic=synthetic_demo,
+            access="authorized" if synthetic_demo else "public_or_authorized",
         )
         if not crawl.success or not crawl.raw_content:
             return ExtractedStudentInformation(
@@ -201,6 +223,9 @@ class ExtractionAgent(BaseAgent):
             return values[0] if values else None
 
         profile = StudentProfile(
+            student_reference=f"synthetic-candidate-{record_id}" if record_id else None,
+            source_type="synthetic_demo" if synthetic_demo else "public_or_authorized",
+            is_synthetic=synthetic_demo,
             name=one(ClaimType.NAME), university=one(ClaimType.UNIVERSITY), degree=one(ClaimType.DEGREE),
             branch=one(ClaimType.BRANCH), expected_graduation_year=one(ClaimType.EXPECTED_GRADUATION_YEAR),
             graduation_year=one(ClaimType.GRADUATION_YEAR), current_academic_year=one(ClaimType.ACADEMIC_YEAR),
@@ -225,3 +250,8 @@ def _split_named_candidate_sections(content: str) -> list[str]:
         return [content]
     return ["\n".join(lines[start:end]).strip()
             for start, end in zip(starts, [*starts[1:], len(lines)])]
+
+
+def _synthetic_record_id(content: str) -> str | None:
+    match = re.search(r"SYNTHETIC DEMO RECORD ID:\s*(\d{4})\b", content, re.I)
+    return match.group(1) if match else None

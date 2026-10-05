@@ -13,7 +13,7 @@
 .match-score small{color:#929eab;font-size:8px}
 .source-results{margin-top:15px;padding:18px;color:#68788a;font-size:10px}
 .source-links{display:grid;gap:7px;margin:12px 0}
-.source-links a{display:grid;gap:4px;padding:9px 11px;border:1px solid #edf0f4;border-radius:6px;color:#3869c3;overflow-wrap:anywhere}
+.source-links a,.source-links .synthetic-source{display:grid;gap:4px;padding:9px 11px;border:1px solid #edf0f4;border-radius:6px;color:#3869c3;overflow-wrap:anywhere}
 .source-links strong{font-size:8px;letter-spacing:.5px;color:#7f8b99}
 .audit-events{display:grid;gap:8px}
 .audit-events article{display:grid;grid-template-columns:minmax(160px,.5fr) 1.5fr;gap:10px;padding:9px 11px;border:1px solid #edf0f4;border-radius:6px}

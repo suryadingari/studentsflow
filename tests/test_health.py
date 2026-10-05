@@ -35,7 +35,7 @@ class _HealthyEngine:
 
 
 def test_database_health_distinguishes_live_application_from_reachable_database(monkeypatch):
-    monkeypatch.setattr(health, "validate_database_url", lambda _url: "validated")
+    monkeypatch.setattr(health, "validate_storage_url", lambda _url, **_kwargs: "validated")
     monkeypatch.setattr(health, "engine", _HealthyEngine())
 
     with TestClient(app) as client:
@@ -50,7 +50,7 @@ def test_database_health_returns_safe_503_and_redacted_server_diagnostic(monkeyp
         def connect(self):
             raise OperationalError("SELECT 1", {}, Exception("password=do-not-leak"))
 
-    monkeypatch.setattr(health, "validate_database_url", lambda _url: "validated")
+    monkeypatch.setattr(health, "validate_storage_url", lambda _url, **_kwargs: "validated")
     monkeypatch.setattr(health, "engine", _FailedEngine())
 
     with TestClient(app) as client:

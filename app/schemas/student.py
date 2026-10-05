@@ -28,6 +28,7 @@ class ClaimType(StrEnum):
 
 
 class EvidenceType(StrEnum):
+    SYNTHETIC_DEMO = "synthetic_demo"
     UNIVERSITY_PROFILE = "university_profile"
     PUBLIC_PROFILE = "public_profile"
     RESUME = "resume"
@@ -96,6 +97,8 @@ class SourceReference(BaseModel):
     final_url: HttpUrl | None = None
     title: str | None = None
     evidence_type: EvidenceType = EvidenceType.OTHER
+    source_type: str | None = None
+    is_synthetic: bool = False
     access: str = "public_or_authorized"
 
 
@@ -121,6 +124,8 @@ class SourcedFact(BaseModel):
 
 class StudentProfile(BaseModel):
     student_reference: str | None = None
+    source_type: str = "public_or_authorized"
+    is_synthetic: bool = False
     name: SourcedFact | None = None
     university: SourcedFact | None = None
     degree: SourcedFact | None = None

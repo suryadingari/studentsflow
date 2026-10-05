@@ -1,7 +1,9 @@
 from functools import lru_cache
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import URL
 
 
 class Settings(BaseSettings):
@@ -27,6 +29,29 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     @property
+    def is_local_demo(self) -> bool:
+        return self.app_env.strip().lower() in {"development", "local", "local-demo"}
+
+    @property
+    def database_url_is_placeholder(self) -> bool:
+        value = (self.database_url or "").strip().lower()
+        return not value or any(token in value for token in (
+            "username:password@", "/database_name", "your_password", "changeme"))
+
+    @property
+    def effective_database_url(self) -> str:
+        """Use an ignored local SQLite file for placeholder development settings only."""
+        if self.database_url_is_placeholder and self.is_local_demo:
+            path = Path(__file__).resolve().parents[2] / "studentsflow_local.db"
+            return URL.create("sqlite+aiosqlite", database=str(path)).render_as_string(
+                hide_password=False)
+        return (self.database_url or "").strip()
+
+    @property
+    def initializes_local_schema(self) -> bool:
+        return self.is_local_demo and self.effective_database_url.startswith("sqlite+")
+
+    @property
     def allowed_domain_set(self) -> frozenset[str]:
         return frozenset(domain.strip() for domain in self.allowed_domains.split(",") if domain.strip())
 
@@ -47,12 +72,12 @@ class Settings(BaseSettings):
                     or parsed.username is not None or parsed.password is not None
                     or parsed.path not in {"", "/"} or parsed.query or parsed.fragment):
                 raise ValueError("CORS_ALLOWED_ORIGINS entries must be HTTP(S) origins without paths or credentials")
-            if self.app_env.lower() != "development" and parsed.scheme != "https":
+            if not self.is_local_demo and parsed.scheme != "https":
                 raise ValueError("CORS_ALLOWED_ORIGINS must use HTTPS outside development")
             origin = f"{parsed.scheme}://{parsed.netloc}"
             if origin not in origins:
                 origins.append(origin)
-        if self.app_env.lower() == "development" and "http://localhost:5173" not in origins:
+        if self.is_local_demo and "http://localhost:5173" not in origins:
             origins.append("http://localhost:5173")
         return origins
 

@@ -85,7 +85,7 @@ async def current_principal(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> Principal:
-    if settings.app_env.lower() == "development" and credentials is None:
+    if settings.is_local_demo and credentials is None:
         return Principal(user_id="local-demo", username="local-demo", role="admin")
     if not settings.auth_secret_key or len(settings.auth_secret_key) < 32:
         raise HTTPException(status_code=503, detail="Authentication is not configured.")

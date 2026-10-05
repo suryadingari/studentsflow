@@ -1,4 +1,4 @@
-import { NavLink, Outlet } from 'react-router-dom'
+import { Link, NavLink, Outlet } from 'react-router-dom'
 
 const links = [
   ['/', '⌂', 'Dashboard'], ['/find', '＋', 'Find candidates'], ['/workflows', '◷', 'Workflows'],
@@ -8,7 +8,7 @@ export function AppShell() {
   const user = (() => { try { return JSON.parse(sessionStorage.getItem('studentsflow-user') || '{}') as { username?: string; role?: string } } catch { return {} } })()
   const visibleLinks = user.role === 'user' ? links.filter(([, , title]) => title !== 'Analytics') : links
   return <div className="app-shell">
-    <aside className="sidebar"><a className="brand" href="/" aria-label="CandidateFlow home"><span className="brand-icon">C</span><span>candidate<span className="brand-light">flow</span><small>RESEARCH OPERATIONS</small></span></a>
+    <aside className="sidebar"><Link className="brand" to="/" aria-label="StudentsFlow home"><span className="brand-icon">S</span><span>students<span className="brand-light">flow</span><small>RESEARCH OPERATIONS</small></span></Link>
       <p className="nav-caption">WORKSPACE</p><nav aria-label="Primary navigation">{visibleLinks.map(([to, icon, title]) => <NavLink key={to} to={to} end={to === '/'} className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}><span className="nav-icon" aria-hidden="true">{icon}</span>{title}</NavLink>)}</nav>
       <div className="sidebar-bottom"><span className="live-dot" /> API workspace <small>Local development</small></div>
     </aside>

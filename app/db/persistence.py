@@ -3,6 +3,8 @@
 import hashlib
 import json
 import uuid
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any
 
@@ -18,6 +20,7 @@ from app.models import (AgentRunRecord, ApprovalRecordModel, AuditLogRecord,
                         StudentEvidenceRecord, StudentRecord, StudentSourceRecord,
                         ToolCallRecord, WorkflowRecord, WorkflowStepRecord)
 from app.schemas.workflow import WorkflowRequest, WorkflowResult
+from app.schemas.workflow import WorkflowStatus
 
 
 _SECRET_KEYS = {"password", "token", "secret", "api_key", "authorization", "email", "recipient",
@@ -33,6 +36,19 @@ def _json(value: Any) -> Any:
 
 def _key(prefix: str, *parts: str) -> str:
     return f"{prefix}-" + hashlib.sha256("\0".join(parts).encode()).hexdigest()[:28]
+
+
+async def _existing_rows(session: AsyncSession, model: Any, key_name: str,
+                         keys: list[str]) -> dict[str, Any]:
+    """Fetch projected rows in bounded batches instead of issuing N+1 lookups."""
+    unique_keys = list(dict.fromkeys(keys))
+    found: dict[str, Any] = {}
+    column = getattr(model, key_name)
+    for start in range(0, len(unique_keys), 500):
+        batch = unique_keys[start:start + 500]
+        rows = (await session.scalars(select(model).where(column.in_(batch)))).all()
+        found.update((getattr(row, key_name), row) for row in rows)
+    return found
 
 
 def _safe_details(value: Any) -> Any:
@@ -69,6 +85,20 @@ def validate_database_url(database_url: str) -> str:
     return value
 
 
+def validate_storage_url(database_url: str, *, allow_sqlite: bool = False) -> str:
+    """Validate an application persistence URL, optionally for the local adapter."""
+    value = (database_url or "").strip()
+    if allow_sqlite and value.startswith("sqlite+aiosqlite:///"):
+        try:
+            parsed = make_url(value)
+        except Exception as error:
+            raise DatabaseConfigurationError("Local SQLite URL is malformed.") from error
+        if not parsed.database:
+            raise DatabaseConfigurationError("Local SQLite URL must name a database file.")
+        return value
+    return validate_database_url(value)
+
+
 class PostgresWorkflowRepository:
     """Persists restartable workflow snapshots and normalized projections."""
 
@@ -77,7 +107,7 @@ class PostgresWorkflowRepository:
         self.database_url = database_url
 
     def ensure_configured(self) -> None:
-        validate_database_url(self.database_url)
+        validate_storage_url(self.database_url, allow_sqlite=True)
 
     async def save_workflow(self, result: WorkflowResult, request: WorkflowRequest,
                             *, hop_count: int = 0) -> None:
@@ -94,21 +124,38 @@ class PostgresWorkflowRepository:
                 for name, value in req_values.items():
                     setattr(req, name, value)
             workflow = await session.get(WorkflowRecord, result.workflow_id)
+            runtime_state = dict(workflow.runtime_json or {}) if workflow is not None else {}
+            synthetic_projection_done = bool(runtime_state.get("synthetic_projection_done"))
+            terminal_snapshot = result.status in {
+                WorkflowStatus.WAITING_FOR_APPROVAL, WorkflowStatus.COMPLETED,
+                WorkflowStatus.FAILED, WorkflowStatus.CANCELLED,
+            }
+            project_synthetic_data = (
+                not request.synthetic_demo_dataset
+                or (terminal_snapshot and not synthetic_projection_done)
+            )
+            if request.synthetic_demo_dataset and terminal_snapshot:
+                runtime_state["synthetic_projection_done"] = True
             values = {
                 "owner_id": request.owner_id,
                 "requirement_id": result.requirement_id, "status": result.status.value,
                 "current_step": result.current_step.value if result.current_step else None,
                 "created_at": result.created_at, "updated_at": result.updated_at,
                 "request_json": request_data, "result_json": payload,
-                "runtime_json": {"hop_count": hop_count},
+                "runtime_json": {**runtime_state, "hop_count": hop_count},
             }
             if workflow is None:
                 session.add(WorkflowRecord(workflow_id=result.workflow_id, **values))
             else:
                 for name, value in values.items():
                     setattr(workflow, name, value)
+            existing_steps = await _existing_rows(
+                session, WorkflowStepRecord, "step_id", [step.step_id for step in result.steps])
+            existing_runs = await _existing_rows(
+                session, AgentRunRecord, "execution_id",
+                [step.execution_id for step in result.steps if step.execution_id])
             for step in result.steps:
-                row = await session.get(WorkflowStepRecord, step.step_id)
+                row = existing_steps.get(step.step_id)
                 step_values = {
                     "workflow_id": step.workflow_id, "step_type": step.step_type.value,
                     "logical_item_id": step.logical_item_id, "agent_name": step.agent_name,
@@ -126,7 +173,7 @@ class PostgresWorkflowRepository:
                     for name, value in step_values.items():
                         setattr(row, name, value)
                 if step.execution_id and step.agent_name and step.agent_version:
-                    execution = await session.get(AgentRunRecord, step.execution_id)
+                    execution = existing_runs.get(step.execution_id)
                     run_values = {
                         "workflow_id": result.workflow_id, "step_id": step.step_id,
                         "agent_name": step.agent_name, "agent_version": step.agent_version,
@@ -140,16 +187,33 @@ class PostgresWorkflowRepository:
                     else:
                         for name, value in run_values.items():
                             setattr(execution, name, value)
-            await self._project_candidates(session, result)
-            await self._project_matches(session, result)
+            if project_synthetic_data:
+                await self._project_candidates(session, result)
+                await self._project_matches(session, result)
             await self._project_email_and_outreach(session, result)
             await self._project_tools(session, result)
             await self._project_metrics(session, result)
 
     async def _project_candidates(self, session: AsyncSession, result: WorkflowResult) -> None:
+        student_ids = [student.canonical_id for student in result.canonical_students]
+        source_keys = [
+            _key("source", student.canonical_id, str(source.source_url))
+            for student in result.canonical_students for source in student.profile.source_references
+        ]
+        evidence_keys = [evidence.evidence_id for student in result.canonical_students
+                         for evidence in student.profile.evidence]
+        students_existing = await _existing_rows(session, StudentRecord, "student_id", student_ids)
+        sources_existing = await _existing_rows(session, StudentSourceRecord, "source_id", source_keys)
+        evidence_existing = await _existing_rows(session, StudentEvidenceRecord, "evidence_id", evidence_keys)
+        evidence_statuses: dict[str, str] = {}
+        for validated in result.validated_profiles:
+            for claim in [*validated.validated_claims, *validated.unsupported_claims]:
+                for evidence_id in claim.evidence_ids:
+                    evidence_statuses[evidence_id] = claim.status.value
+
         for student in result.canonical_students:
             student_id = student.canonical_id
-            row = await session.get(StudentRecord, student_id)
+            row = students_existing.get(student_id)
             profile = student.profile
             values = {"workflow_id": result.workflow_id, "profile_json": _json(profile),
                       "final_year_status": profile.final_year_status.value,
@@ -169,9 +233,10 @@ class PostgresWorkflowRepository:
             for url, source in sources.items():
                 source_id = _key("source", student_id, url)
                 source_ids[url] = source_id
-                record = await session.get(StudentSourceRecord, source_id)
+                record = sources_existing.get(source_id)
                 src_values = {"student_id": student_id, "source_url": url,
-                              "source_title": source.title, "source_type": source.evidence_type.value,
+                              "source_title": source.title,
+                              "source_type": source.source_type or source.evidence_type.value,
                               "access": source.access,
                               "observed_at": None}
                 if record is None:
@@ -184,16 +249,9 @@ class PostgresWorkflowRepository:
                 source_id = source_ids.get(url)
                 if source_id is None:
                     continue
-                record = await session.get(StudentEvidenceRecord, evidence.evidence_id)
-                evidence_status = evidence.validation_status.value
-                for validated in result.validated_profiles:
-                    if any(item.evidence_id == evidence.evidence_id for item in validated.evidence_references):
-                        claim = next((item for item in [*validated.validated_claims,
-                                                        *validated.unsupported_claims]
-                                      if evidence.evidence_id in item.evidence_ids), None)
-                        if claim is not None:
-                            evidence_status = claim.status.value
-                        break
+                record = evidence_existing.get(evidence.evidence_id)
+                evidence_status = evidence_statuses.get(
+                    evidence.evidence_id, evidence.validation_status.value)
                 evidence_values = {
                     "student_id": student_id, "source_id": source_id,
                     "claim_type": evidence.claim_type.value,
@@ -208,6 +266,9 @@ class PostgresWorkflowRepository:
                 else:
                     for name, value in evidence_values.items():
                         setattr(record, name, value)
+        dedup_keys = [_key("dedup", result.workflow_id, str(index))
+                      for index in range(len(result.deduplication_decisions))]
+        dedup_existing = await _existing_rows(session, DeduplicationRecord, "record_id", dedup_keys)
         for index, decision in enumerate(result.deduplication_decisions):
             left = _canonical_for_profile(result.validated_profiles, result.canonical_students,
                                           decision.left_profile_index)
@@ -215,8 +276,8 @@ class PostgresWorkflowRepository:
                                            decision.right_profile_index)
             if left is None or right is None:
                 continue
-            record_id = _key("dedup", result.workflow_id, str(index))
-            record = await session.get(DeduplicationRecord, record_id)
+            record_id = dedup_keys[index]
+            record = dedup_existing.get(record_id)
             values = {"workflow_id": result.workflow_id, "left_student_id": left,
                       "right_student_id": right, "decision": decision.decision.value,
                       "decision_json": _json(decision)}
@@ -227,9 +288,12 @@ class PostgresWorkflowRepository:
                     setattr(record, name, value)
 
     async def _project_matches(self, session: AsyncSession, result: WorkflowResult) -> None:
+        match_ids = [_key("match", result.workflow_id, match.canonical_student_id)
+                     for match in result.candidate_matches]
+        existing_matches = await _existing_rows(session, MatchRecord, "match_id", match_ids)
         for match in result.candidate_matches:
             record_id = _key("match", result.workflow_id, match.canonical_student_id)
-            row = await session.get(MatchRecord, record_id)
+            row = existing_matches.get(record_id)
             values = {"workflow_id": result.workflow_id,
                       "requirement_id": result.requirement_id,
                       "student_id": match.canonical_student_id,
@@ -470,16 +534,46 @@ class PostgresEventRecorder:
     def __init__(self, sessions: async_sessionmaker[AsyncSession], database_url: str) -> None:
         self.sessions = sessions
         self.database_url = database_url
+        self._buffer: ContextVar[list[AgentEvent] | None] = ContextVar(
+            f"audit_buffer_{id(self)}", default=None)
+
+    @asynccontextmanager
+    async def buffered(self):
+        """Batch audit inserts during the explicitly synthetic high-volume demo."""
+        existing = self._buffer.get()
+        if existing is not None:
+            yield
+            return
+        token = self._buffer.set([])
+        try:
+            yield
+        finally:
+            pending = self._buffer.get() or []
+            self._buffer.reset(token)
+            if pending:
+                await self.record_many(pending)
 
     async def record(self, event: AgentEvent) -> None:
-        validate_database_url(self.database_url)
+        pending = self._buffer.get()
+        if pending is not None:
+            pending.append(event)
+            return
+        await self.record_many([event])
+
+    async def record_many(self, events: list[AgentEvent]) -> None:
+        if not events:
+            return
+        validate_storage_url(self.database_url, allow_sqlite=True)
         async with self.sessions.begin() as session:
-            session.add(AuditLogRecord(
-                audit_id=str(uuid.uuid4()), workflow_id=event.workflow_id,
-                step_id=event.workflow_step_id, execution_id=event.execution_id,
-                event_type=event.event_type.value, agent_name=event.agent_name,
-                agent_version=event.agent_version, occurred_at=event.occurred_at,
-                details_json=_safe_details(event.details)))
+            session.add_all([
+                AuditLogRecord(
+                    audit_id=str(uuid.uuid4()), workflow_id=event.workflow_id,
+                    step_id=event.workflow_step_id, execution_id=event.execution_id,
+                    event_type=event.event_type.value, agent_name=event.agent_name,
+                    agent_version=event.agent_version, occurred_at=event.occurred_at,
+                    details_json=_safe_details(event.details))
+                for event in events
+            ])
 
 
 def _canonical_for_profile(validated, canonical, profile_index: int) -> str | None:

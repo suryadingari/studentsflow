@@ -31,6 +31,7 @@ class WorkflowStatus(StrEnum):
 
 
 class WorkflowStepType(StrEnum):
+    RESEARCH = "research"
     SOURCE_DISCOVERY = "source_discovery"
     STUDENT_CRAWLING = "student_crawling"
     EXTRACTION = "extraction"
@@ -65,6 +66,7 @@ class WorkflowRequest(BaseModel):
     campaign_id: str | None = None
     signature: str = "Research Team"
     demo_mode: bool = True
+    synthetic_demo_dataset: bool = False
     search_enabled: bool = False
     max_search_results: int = Field(default=10, ge=1, le=25)
     permitted_tools: frozenset[str] = Field(default_factory=lambda: frozenset({
@@ -115,6 +117,7 @@ class WorkflowResult(BaseModel):
     job_id: str | None = None
     requirement_id: str
     status: WorkflowStatus
+    synthetic_demo_dataset: bool = False
     current_step: WorkflowStepType | None = None
     steps: list[WorkflowStep] = Field(default_factory=list)
     pending_draft_ids: list[str] = Field(default_factory=list)

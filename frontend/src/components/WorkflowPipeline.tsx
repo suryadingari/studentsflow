@@ -2,8 +2,8 @@ import type { PersistedStep, WorkflowStep } from '../types/api'
 import { StatusBadge } from './States'
 
 const stages: Array<[string, string]> = [
-  ['source_discovery', 'Source Discovery'], ['student_crawling', 'Student Crawler'], ['extraction', 'Extraction'],
-  ['validation', 'Validation'], ['deduplication', 'Deduplication'], ['enrichment', 'Enrichment'],
+  ['research', 'Research · discovery, crawl, extraction, validation'],
+  ['deduplication', 'Deduplication'], ['enrichment', 'Enrichment'],
   ['matching', 'Matching'], ['email_drafting', 'Email Drafting'], ['human_approval', 'Human Approval'],
   ['outreach', 'Outreach'], ['follow_up', 'Follow-up'],
 ]

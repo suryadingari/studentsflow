@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.db.persistence import validate_database_url, _safe_details
+from app.db.persistence import validate_storage_url, _safe_details
 from app.agents.events import AgentEvent, AgentEventType
 from app.models import (FollowUpPlanRecord, OptOutRecordModel, OutreachEventRecord,
                         OutreachRecord, ReplyRecordModel)
@@ -25,7 +25,7 @@ class PersistentOutreachStore(InMemoryOutreachStore):
         self.database_url = database_url
 
     def _check(self) -> None:
-        validate_database_url(self.database_url)
+        validate_storage_url(self.database_url, allow_sqlite=True)
 
     async def reserve(self, state: OutreachState):
         self._check()
@@ -258,12 +258,12 @@ class PersistentOptOutService(InMemoryOptOutService):
     async def has_opted_out(self, recipient: str) -> bool:
         if await super().has_opted_out(recipient):
             return True
-        validate_database_url(self.database_url)
+        validate_storage_url(self.database_url, allow_sqlite=True)
         async with self.sessions() as session:
             return await session.get(OptOutRecordModel, recipient.strip().lower()) is not None
 
     async def record_opt_out(self, request: OptOutRequest):
-        validate_database_url(self.database_url)
+        validate_storage_url(self.database_url, allow_sqlite=True)
         recipient = request.recipient.strip().lower()
         async with self.sessions.begin() as session:
             row = await session.get(OptOutRecordModel, recipient)

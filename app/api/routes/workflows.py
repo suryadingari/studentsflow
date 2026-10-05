@@ -9,6 +9,7 @@ from app.db.persistence import DatabaseConfigurationError
 from app.schemas.email import ApprovalAction
 from app.schemas.workflow import WorkflowRequest, WorkflowResult
 from app.auth.security import Principal, admin_principal, current_principal
+from app.crawling.demo_fixture import SYNTHETIC_DEMO_DOMAIN, synthetic_demo_source
 
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
@@ -47,6 +48,20 @@ async def _require_workflow_access(request: Request, workflow_id: str, principal
 async def create_workflow(payload: WorkflowRequest, request: Request,
                           principal: Principal = Depends(current_principal)) -> WorkflowResult:
     try:
+        if payload.synthetic_demo_dataset:
+            permitted_domains = frozenset({SYNTHETIC_DEMO_DOMAIN})
+            configuration = payload.crawl_configuration.model_copy(update={
+                "allowed_domains": permitted_domains, "max_pages": 1, "max_depth": 0,
+                "max_crawl_hops": 1, "min_request_interval_seconds": 0,
+            }, deep=True)
+            payload = payload.model_copy(update={
+                "sources": [synthetic_demo_source()],
+                "permitted_domains": permitted_domains,
+                "crawl_configuration": configuration,
+                "demo_mode": True,
+                "search_enabled": False,
+                "max_hops": max(payload.max_hops, 5000),
+            }, deep=True)
         owned_payload = payload.model_copy(update={"owner_id": principal.user_id}, deep=True)
         return await _orchestrator(request).submit(owned_payload)
     except (DatabaseConfigurationError, SQLAlchemyError) as error:

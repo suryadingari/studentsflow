@@ -20,7 +20,7 @@ router = APIRouter(prefix="/auth", tags=["authentication"])
 
 @router.get("/mode")
 async def authentication_mode() -> dict[str, bool]:
-    return {"required": settings.app_env.lower() != "development"}
+    return {"required": not settings.is_local_demo}
 
 
 class LoginRequest(BaseModel):
